@@ -1,0 +1,9 @@
+{
+  "deploy_target": "nuc",
+  "local_validated": false,
+  "validated_at": null,
+  "git_sha": null,
+  "prod_deployed": false,
+  "prod_deployed_at": null,
+  "prod_url": null
+}

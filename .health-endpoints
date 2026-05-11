@@ -1,0 +1,5 @@
+# Health check endpoints - one per line
+# Format: <service-name> <url-or-path>
+# Example:
+#   api http://localhost:8787/health
+#   worker http://localhost:8788/health

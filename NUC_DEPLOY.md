@@ -70,7 +70,7 @@ If first deploy, the Caddyfile fragment is generated from the template and copie
 sleep 15
 
 # Run same healthcheck-all.sh against NUC URL instead of localhost
-NUC_URL=https://dim-capture-app.rolodex-ai.com ./scripts/healthcheck-all.sh
+NUC_URL=http://dims.gocold.local ./scripts/healthcheck-all.sh
 ```
 
 Acceptance: every health endpoint returns 200.
@@ -78,7 +78,7 @@ Acceptance: every health endpoint returns 200.
 ### Stage 7: Smoke test against production
 Run a subset of smoke tests against the deployed instance — read-only operations only, NO writes that could pollute production data:
 ```bash
-NUC_URL=https://dim-capture-app.rolodex-ai.com ./scripts/smoke-prod-readonly.sh
+NUC_URL=http://dims.gocold.local ./scripts/smoke-prod-readonly.sh
 ```
 
 ### Stage 8: Update deploy state
@@ -90,7 +90,7 @@ On success, update `.deploy-state`:
   "git_sha": "<sha>",
   "nuc_deployed": true,
   "nuc_deployed_at": "<iso-now>",
-  "nuc_url": "https://dim-capture-app.rolodex-ai.com"
+  "nuc_url": "http://dims.gocold.local"
 }
 ```
 
@@ -98,7 +98,7 @@ Commit the `.deploy-state` change to main: `chore: deploy <sha> to NUC`.
 
 ### Stage 9: Notify
 Tell Jake:
-> Deployed `dim-capture-app` SHA `<sha>` to NUC. Live at https://dim-capture-app.rolodex-ai.com. All health checks green. Read-only smoke tests passed.
+> Deployed `dim-capture-app` SHA `<sha>` to NUC. Live at http://dims.gocold.local. All health checks green. Read-only smoke tests passed.
 
 ## Rollback
 

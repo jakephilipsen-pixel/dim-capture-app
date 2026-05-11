@@ -7,8 +7,8 @@ React 19 + TS + Vite + Tailwind + shadcn/ui / Node Express + TS / PostgreSQL 16 
 
 ## Deployment
 - **Target:** nuc
-- **Production URL:** https://dim-capture-app.rolodex-ai.com
-- **Details:** NUC via Docker Compose + Caddy at dim-capture-app.rolodex-ai.com
+- **Production URL:** http://dims.gocold.local (LAN-only — no Cloudflare tunnel)
+- **Details:** NUC via Docker Compose + Caddy at dims.gocold.local (warehouse LAN only)
 
 ## Repo
 - GitHub: https://github.com/jakephilipsen-pixel/dim-capture-app

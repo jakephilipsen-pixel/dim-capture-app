@@ -6,4 +6,4 @@ See [PROJECT.md](./PROJECT.md) for full details.
 See [MODULES.md](./MODULES.md) for module status.
 
 **Deploy target:** nuc
-**Production URL:** https://dim-capture-app.rolodex-ai.com
+**Production URL:** http://dims.gocold.local (warehouse LAN only)

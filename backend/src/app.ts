@@ -5,6 +5,7 @@ import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/logger";
 import adminRouter from "./routes/admin";
 import dimsRouter from "./routes/dims";
+import progressRouter from "./routes/progress";
 import skusRouter from "./routes/skus";
 import syncRouter from "./routes/sync";
 
@@ -31,6 +32,7 @@ app.use("/api/skus", skusRouter);
 app.use("/api/dims", dimsRouter);
 app.use("/api/sync", syncRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/progress", progressRouter);
 
 app.use(errorHandler);
 

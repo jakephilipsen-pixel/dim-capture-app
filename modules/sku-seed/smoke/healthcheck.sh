@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
-# Health check for this module - replace with real check
-# Should curl the module's health endpoint and exit 0 on 200
-set -e
-echo "TODO: implement healthcheck for module"
+# Smoke: sku-seed health check. Polls the backend's /api/health until the DB
+# reports connected (migrate deploy + Postgres ready), or times out.
+set -euo pipefail
+
+BASE_URL="${BASE_URL:-http://localhost:3009}"
+ATTEMPTS="${ATTEMPTS:-30}"
+
+for i in $(seq 1 "$ATTEMPTS"); do
+  if curl -sf "$BASE_URL/api/health" 2>/dev/null | grep -q '"db":"connected"'; then
+    echo "PASS: health ok ($BASE_URL/api/health) after ${i}s"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "FAIL: /api/health did not report db:connected within ${ATTEMPTS}s"
+curl -s "$BASE_URL/api/health" || true
 exit 1

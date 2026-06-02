@@ -248,6 +248,44 @@ export class CcClient {
   }
 
   /**
+   * List products for a warehouse account, one page at a time.
+   * `GET /products?warehouseAccountId={warehouseId}&page={page}&pageSize={pageSize}`.
+   * Returns the page's products (possibly empty). Callers paginate by
+   * incrementing `page` until a page returns fewer than `pageSize` items.
+   * Throws `CcApiError` on any non-2xx response.
+   *
+   * Added in the sku-seed module (03) for the admin seed pull.
+   */
+  async listProducts(
+    warehouseId: string,
+    page: number,
+    pageSize: number,
+  ): Promise<CcProduct[]> {
+    this.guard();
+    const url = new URL(`${this.baseUrl}/products`);
+    url.searchParams.set("warehouseAccountId", warehouseId);
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("pageSize", String(pageSize));
+
+    const res = await this.fetchImpl(url.toString(), {
+      method: "GET",
+      headers: this.headers(false),
+    });
+
+    // A 404 on the list endpoint means "no such page" — treat as the end of
+    // the result set (empty page) rather than an error.
+    if (res.status === 404) return [];
+    if (!res.ok) {
+      throw new CcApiError(
+        `listProducts failed (warehouse ${warehouseId}, page ${page}): ${res.status} ${await safeText(res)}`,
+        res.status,
+      );
+    }
+
+    return extractProducts(await res.json()).map(toCcProduct);
+  }
+
+  /**
    * Push captured dimensions to a CC product.
    * `PATCH /products/{productId}` with `{ length, width, height, weight }`.
    * Units pass through unchanged (mm / kg). Throws `CcNotFoundError` on 404,

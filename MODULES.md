@@ -12,7 +12,7 @@ This file is the source of truth for module breakdown and status. Update on ever
 
 | # | Name | Status | Branch | Depends on | Notes |
 |---|------|--------|--------|-----------|-------|
-| 01 | `backend-core` | 🔲 | feature/backend-core (scaffold only) | — | Scaffold only — all routes return 501, no migrations run, no `.env`, tests not passing; build not started (see `modules/backend-core/STATE.md`). Target: Express + TS, Prisma schema (Sku + Dim), migrations, DB connection, health endpoint, error middleware |
+| 01 | `backend-core` | ✅ | feature/backend-core | — | Express + TS, Prisma schema (Sku + Dim), migration, DB connection, `/api/health`, AppError + error middleware, pino logging, 501 route stubs. Smoke green (2026-06-03); typecheck/lint clean; 7/7 unit tests. STATE.md current. |
 | 02 | `cc-client` | 🔲 | — | 01 | CartonCloud API client — token-bucket rate limiter (60 req/min), product lookup by barcode, PATCH product dims |
 | 03 | `sku-seed` | 🔲 | — | 01, 02 | POST /api/admin/seed (paginated CC pull, idempotent), GET /api/skus, GET /api/skus/:barcode (DB-first → CC fallback), GET /api/progress |
 | 04 | `dim-api` | 🔲 | — | 01, 02 | POST/GET/PUT /api/dims (Zod validation) + syncService.ts + POST /api/sync/cc (batch of 10, retry on failure) |

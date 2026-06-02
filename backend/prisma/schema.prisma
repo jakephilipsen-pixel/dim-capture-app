@@ -1,0 +1,35 @@
+generator client {
+  provider      = "prisma-client-js"
+  // "native" for local dev (glibc); musl+OpenSSL3 target for the node:22-alpine
+  // container, otherwise the schema/query engine fails to load libssl in Docker.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Sku {
+  id              String   @id                 // CartonCloud product UUID
+  barcode         String   @unique
+  name            String
+  ccDimsCaptured  Boolean  @default(false)     // dims already in CC before we started
+  createdAt       DateTime @default(now())
+  dims            Dim?
+}
+
+model Dim {
+  id          Int       @id @default(autoincrement())
+  skuId       String    @unique
+  sku         Sku       @relation(fields: [skuId], references: [id])
+  lengthMm    Float
+  widthMm     Float
+  heightMm    Float
+  weightKg    Float
+  measuredBy  String
+  measuredAt  DateTime  @default(now())
+  syncedToCC  Boolean   @default(false)
+  syncedAt    DateTime?
+  notes       String?
+}

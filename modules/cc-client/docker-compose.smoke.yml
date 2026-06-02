@@ -1,0 +1,23 @@
+# Smoke stack for cc-client (a route-less service module).
+# Boots the REAL backend image but overrides the command to run the dev-only
+# smoke server, which exercises ccClient against an in-container mock CC.
+# No Postgres, no real CartonCloud — cc-client has no DB dependency.
+#
+# Host port 3007 (3006 is taken by an unrelated project on this laptop).
+services:
+  cc-client-smoke:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/ccClientSmoke.js"]
+    ports:
+      - "3007:3007"
+    environment:
+      NODE_ENV: production
+      SMOKE_PORT: "3007"
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/smoke/health | grep -q '\"status\":\"ok\"'"]
+      interval: 3s
+      timeout: 5s
+      retries: 10

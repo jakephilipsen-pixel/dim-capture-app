@@ -13,7 +13,7 @@ This file is the source of truth for module breakdown and status. Update on ever
 | # | Name | Status | Branch | Depends on | Notes |
 |---|------|--------|--------|-----------|-------|
 | 01 | `backend-core` | ✅ | feature/backend-core | — | Express + TS, Prisma schema (Sku + Dim), migration, DB connection, `/api/health`, AppError + error middleware, pino logging, 501 route stubs. Smoke green (2026-06-03); typecheck/lint clean; 7/7 unit tests. STATE.md current. |
-| 02 | `cc-client` | 🔲 | — | 01 | CartonCloud API client — token-bucket rate limiter (60 req/min), product lookup by barcode, PATCH product dims |
+| 02 | `cc-client` | ✅ | feature/cc-client | 01 | CartonCloud API client — token-bucket limiter (60/min, rejects when empty), `lookupByBarcode`, `patchProductDims`, typed errors. Bearer+`X-Tenant-Id` per spec. Route-less service. 13 unit tests (mocked fetch), smoke green (2026-06-03) via in-container mock CC. STATE.md current. |
 | 03 | `sku-seed` | 🔲 | — | 01, 02 | POST /api/admin/seed (paginated CC pull, idempotent), GET /api/skus, GET /api/skus/:barcode (DB-first → CC fallback), GET /api/progress |
 | 04 | `dim-api` | 🔲 | — | 01, 02 | POST/GET/PUT /api/dims (Zod validation) + syncService.ts + POST /api/sync/cc (batch of 10, retry on failure) |
 | 05 | `frontend-scaffold` | 🔲 | — | 01 | Vite + React 19 + TS + Tailwind + shadcn/ui + PWA manifest + service worker, React Router (3 routes), layout shell, lib/api.ts, lib/units.ts, SyncStatus, ProgressBar |

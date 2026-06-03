@@ -12,10 +12,25 @@ const LENGTH_UNITS: LengthUnit[] = ['mm', 'cm', 'in']
 
 export type SaveOutcome = 'saved' | 'queued'
 
+/** Existing dim values (always mm/kg) used to pre-fill the form in edit mode. */
+export interface InitialDims {
+  lengthMm: number
+  widthMm: number
+  heightMm: number
+  weightKg: number
+}
+
 export interface DimFormProps {
   sku: SkuDetail
   /** Called after a successful save (online) or offline-queue write. */
   onSaved: (outcome: SaveOutcome) => void
+  /** Pre-fill values (mm/kg). Provided when editing an existing capture. */
+  initialDims?: InitialDims
+  /**
+   * When set, Save corrects this dim via PUT /api/dims/:id instead of POSTing a
+   * new one. Edit mode does not fall back to the offline queue.
+   */
+  dimId?: number
 }
 
 function round(n: number, dp = 3): number {
@@ -43,13 +58,15 @@ function readMeasuredBy(): string {
  * POSTs to /api/dims, falling back to the IndexedDB offline queue when the
  * backend is unreachable. `measuredBy` persists across sessions in localStorage.
  */
-export function DimForm({ sku, onSaved }: DimFormProps) {
+export function DimForm({ sku, onSaved, initialDims, dimId }: DimFormProps) {
   const { enqueue } = useOfflineQueue()
+  const editing = dimId !== undefined
+  // Pre-fill is in mm; the form opens in mm so values map 1:1.
   const [unit, setUnit] = useState<LengthUnit>('mm')
-  const [length, setLength] = useState('')
-  const [width, setWidth] = useState('')
-  const [height, setHeight] = useState('')
-  const [weight, setWeight] = useState('')
+  const [length, setLength] = useState(initialDims ? String(initialDims.lengthMm) : '')
+  const [width, setWidth] = useState(initialDims ? String(initialDims.widthMm) : '')
+  const [height, setHeight] = useState(initialDims ? String(initialDims.heightMm) : '')
+  const [weight, setWeight] = useState(initialDims ? String(initialDims.weightKg) : '')
   const [measuredBy, setMeasuredBy] = useState<string>(readMeasuredBy)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -93,8 +110,7 @@ export function DimForm({ sku, onSaved }: DimFormProps) {
       // localStorage blocked — non-fatal.
     }
 
-    const payload = {
-      skuId: sku.id,
+    const dims = {
       lengthMm: round(toMm(l, unit)),
       widthMm: round(toMm(w, unit)),
       heightMm: round(toMm(h, unit)),
@@ -104,13 +120,19 @@ export function DimForm({ sku, onSaved }: DimFormProps) {
 
     setSaving(true)
     try {
-      await api.saveDim(payload)
-      resetFields()
-      onSaved('saved')
+      if (editing) {
+        // Correction — PUT by dim id. No offline-queue fallback for edits.
+        await api.updateDim(dimId, dims)
+        onSaved('saved')
+      } else {
+        await api.saveDim({ skuId: sku.id, ...dims })
+        resetFields()
+        onSaved('saved')
+      }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 0) {
-        // Offline — queue locally and report queued.
-        await enqueue(payload)
+      if (!editing && err instanceof ApiError && err.status === 0) {
+        // Offline — queue the new capture locally and report queued.
+        await enqueue({ skuId: sku.id, ...dims })
         resetFields()
         onSaved('queued')
       } else {

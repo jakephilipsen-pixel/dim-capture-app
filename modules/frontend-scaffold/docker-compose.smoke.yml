@@ -1,0 +1,21 @@
+# Smoke stack for frontend-scaffold (module 05).
+#
+# Builds the REAL frontend image (Vite build → nginx static serve) and boots
+# it alone. The shell is designed to degrade gracefully when the backend is
+# absent (the progress badge falls back to —/460), so no backend/DB is needed
+# to prove this module boots and serves a valid PWA shell.
+#
+# Host port 5176 → container 80 (dev frontend uses 5175; 5176 dodges a running
+# dev server on Jake's laptop).
+services:
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5176:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10

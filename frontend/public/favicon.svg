@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Dim Capture">
+  <rect width="512" height="512" rx="96" fill="#0284c7" />
+  <g fill="none" stroke="#ffffff" stroke-width="22" stroke-linejoin="round" stroke-linecap="round">
+    <!-- carton -->
+    <path d="M256 120 L392 188 L392 324 L256 392 L120 324 L120 188 Z" />
+    <path d="M120 188 L256 256 L392 188" />
+    <path d="M256 256 L256 392" />
+    <!-- measure tick -->
+    <path d="M256 120 L256 256" opacity="0.55" />
+  </g>
+</svg>

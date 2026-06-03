@@ -1,0 +1,75 @@
+# Smoke stack for capture-page (module 06).
+#
+# The capture page has real runtime dependencies (sku-seed lookup + dim-api
+# save/sync), so the smoke boots the full stack: a throwaway Postgres, an
+# in-container mock CartonCloud, the REAL backend image, and the REAL frontend
+# image (Vite build → nginx). The happy-path drives the exact API round-trip
+# the page performs (seed → lookup → POST /api/dims → progress → sync) and
+# asserts the frontend serves the shell. No browser/camera — the camera, torch,
+# beep, and offline-queue paths are covered by unit tests.
+#
+# Host ports: backend 3010, frontend 5177 (Postgres + mock-cc internal-only).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dimcapture
+      POSTGRES_USER: gocold
+      POSTGRES_PASSWORD: gocold
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mock-cc:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/mockCc.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:9099/products?barcode=9311111000011&warehouseAccountId=wh-forage' | grep -q cc-1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    ports:
+      - "3010:3005"
+    environment:
+      NODE_ENV: production
+      PORT: "3005"
+      DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
+      CC_API_KEY: smoke-key
+      CC_TENANT_ID: smoke-tenant
+      CC_WAREHOUSE_ID: wh-forage
+      CC_BASE_URL: http://mock-cc:9099
+      FRONTEND_URL: http://localhost:5177
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-cc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/health | grep -q '\"db\":\"connected\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5177:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10

@@ -15,16 +15,23 @@ vi.mock('@/context/ProgressContext', () => ({
   })),
 }))
 
+// The real Capture page (module 06) mounts at "/" and its RecentCaptures
+// calls GET /api/dims — stub it so routing tests make no network call.
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return { ...actual, api: { ...actual.api, getDims: vi.fn().mockResolvedValue([]) } }
+})
+
 function renderAt(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] })
   return render(<RouterProvider router={router} />)
 }
 
 describe('routing', () => {
-  it('renders the Capture placeholder at /', () => {
+  it('renders the Capture page at /', async () => {
     renderAt('/')
-    expect(screen.getByRole('heading', { name: 'Capture' })).toBeInTheDocument()
-    expect(screen.getByText('/', { exact: true })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /scan barcode/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/search barcode or sku name/i)).toBeInTheDocument()
   })
 
   it('renders the Progress placeholder at /progress', () => {
@@ -44,9 +51,9 @@ describe('routing', () => {
     expect(screen.getByText('Not found')).toBeInTheDocument()
   })
 
-  it('shows the fallback progress badge when backend is offline', () => {
+  it('shows the fallback progress badge when backend is offline', async () => {
     renderAt('/')
     // captured falls back to "—", total to 460
-    expect(screen.getByLabelText('capture progress')).toHaveTextContent('—/460')
+    expect(await screen.findByLabelText('capture progress')).toHaveTextContent('—/460')
   })
 })

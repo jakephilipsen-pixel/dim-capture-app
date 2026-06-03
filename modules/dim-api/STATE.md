@@ -9,6 +9,26 @@
 `feature/dim-api` (branched from `main` after sku-seed/#3 merged)
 
 ## Last touched
+2026-06-04 — C1 concurrency fix (branch `fix/sync-concurrency`).
+`syncUnsyncedDims()` now runs inside a single interactive `prisma.$transaction`
+guarded by a TRANSACTION-scoped Postgres advisory lock
+(`pg_try_advisory_xact_lock(SYNC_LOCK_KEY)`, key `7213544982017336001n`). Only
+one `POST /api/sync/cc` run executes at a time; a concurrent caller fails the
+non-blocking `try`-lock and returns early `{synced:0, failed:0, pending:<live
+count>}` WITHOUT reading the unsynced set or PATCHing — so two overlapping
+calls (Review "Sync Now" racing the 30 s auto-sync) can no longer double-PATCH
+the real CC or burn its 60/min token bucket. All DB ops inside the callback use
+the `tx` client (one pooled connection); `ccClient` stays external HTTP. Chose a
+txn-scoped lock (auto-releases on commit/rollback) over a session
+`pg_advisory_lock`+`pg_advisory_unlock` pair, which can land on different pooled
+connections and leak the lock forever. Explicit `{ timeout: 120_000, maxWait:
+10_000 }` because the 5 s interactive-tx default is too short for batched CC HTTP
+held inside the transaction (module 10 `cc-resilience`'s fetch timeout will
+bound per-call duration). tsc + lint clean, **72/72** tests (was 69; +3
+syncService concurrency tests; the 5 existing syncService tests updated to mock
+`$transaction`/`tx.$queryRaw`). Cross-process exactly-once proof needs real
+Postgres — orchestrator's job via the live container stack.
+
 2026-06-03 — built from scratch on merged backend-core + cc-client + sku-seed.
 Dim capture/correct/list routes + batch sync to CC, zod validation in the
 service layer, 23 new unit tests, containerised smoke (Postgres + mock CC with
@@ -99,6 +119,16 @@ modules/dim-api/
   try/catch; a failure is logged via pino, the dim stays `syncedToCC=false`, and
   the loop continues to the next dim and next batch. The endpoint only 500s if the
   *initial* `findMany`/final `count` query itself throws.
+- **Sync runs are serialised by a transaction-scoped advisory lock (C1 fix,
+  2026-06-04).** The entire run is one `prisma.$transaction`; its first statement
+  is `pg_try_advisory_xact_lock(SYNC_LOCK_KEY)` (`7213544982017336001n`). A run
+  that loses the lock returns early `{0,0,<pending>}` and PATCHes nothing — so
+  concurrent `POST /api/sync/cc` calls can't double-PATCH. The lock is *not* a
+  session-level lock+unlock pair (those leak across Prisma's connection pool); the
+  txn-scoped lock auto-releases on commit/rollback. The transaction holds open
+  across the CC HTTP calls, so `{ timeout: 120_000, maxWait: 10_000 }` is set
+  (5 s default too short); module 10 `cc-resilience` will bound per-call time.
+  DB ops inside use `tx`, never the global `prisma`.
 - **`pending` is the live DB count after the run**, not `failed` inferred — so a
   partial sync of 3 with 1 failure reports `{synced:2, failed:1, pending:1}`.
 - **Validation lives in the service** (`dimService` zod schemas), not the route.
@@ -117,8 +147,12 @@ modules/dim-api/
   any `mockResolvedValueOnce` queue (the partial-failure sync test relies on it).
 
 ## Test status
-- [x] Unit tests written — 23 new (10 dimService + 5 syncService + 8 dimRoutes)
-- [x] Unit tests passing (`npm test` → 69/69 incl. backend-core 7 + cc-client 13 + sku-seed 26)
+- [x] Unit tests written — 23 (dim-api build) + 3 (C1 fix, 2026-06-04) = 26 in
+      this module's slice (13 dimService/syncService: 10 dimService + 8 syncService
+      now [was 5] + 8 dimRoutes)
+- [x] Unit tests passing (`npm test` → 72/72 as of 2026-06-04; was 69/69 at
+      dim-api build incl. backend-core 7 + cc-client 13 + sku-seed 26; +3 from the
+      C1 syncService concurrency tests)
 - [x] Typecheck clean (`npx tsc --noEmit` exit 0), lint clean (`npm run lint` exit 0)
 - [x] Smoke written + passing (`./scripts/smoke-module.sh dim-api` exit 0): health
       db:connected; empty→seed→capture→422 (zero dim)→404 (unknown SKU)→list with

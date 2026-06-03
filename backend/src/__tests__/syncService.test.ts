@@ -1,11 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the two singletons syncService depends on.
-vi.mock("../lib/db", () => ({
-  prisma: {
-    dim: { findMany: vi.fn(), update: vi.fn(), count: vi.fn() },
-  },
-}));
+//
+// syncUnsyncedDims now runs inside `prisma.$transaction(cb, opts)` guarded by a
+// transaction-scoped advisory lock (C1 fix). The mock `$transaction` invokes the
+// callback with a `tx` stub that mirrors the global `prisma.dim.*` mocks (so the
+// existing tests keep asserting against `dim.findMany/update/count`) and adds a
+// `$queryRaw` that returns the advisory-lock result. By default the lock is held
+// (`[{ locked: true }]`); the "already running" test overrides it to false.
+vi.mock("../lib/db", () => {
+  const dim = { findMany: vi.fn(), update: vi.fn(), count: vi.fn() };
+  const $queryRaw = vi.fn();
+  const $transaction = vi.fn(
+    async (cb: (tx: unknown) => unknown) => cb({ dim, $queryRaw }),
+  );
+  return { prisma: { dim, $queryRaw, $transaction } };
+});
 vi.mock("../services/ccClient", () => ({
   ccClient: { patchProductDims: vi.fn() },
 }));
@@ -16,6 +26,20 @@ import { syncUnsyncedDims } from "../services/syncService";
 
 const dim = vi.mocked(prisma.dim, true);
 const cc = vi.mocked(ccClient, true);
+// `$queryRaw` is the advisory-lock probe inside the transaction.
+const queryRaw = vi.mocked(
+  (prisma as unknown as { $queryRaw: ReturnType<typeof vi.fn> }).$queryRaw,
+  true,
+);
+
+/** Make the advisory lock report acquired (the run proceeds). */
+function lockAcquired() {
+  queryRaw.mockResolvedValue([{ locked: true }] as never);
+}
+/** Make the advisory lock report contended (another run holds it). */
+function lockContended() {
+  queryRaw.mockResolvedValue([{ locked: false }] as never);
+}
 
 /** A pending (unsynced) dim row, one per index. */
 function pendingDim(i: number) {
@@ -32,6 +56,16 @@ function pendingDim(i: number) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // `resetAllMocks` wipes the `$transaction` implementation set in the factory,
+  // so re-establish it: invoke the callback with the same tx stub shape.
+  (
+    prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }
+  ).$transaction.mockImplementation(
+    async (cb: (tx: unknown) => unknown) =>
+      cb({ dim, $queryRaw: queryRaw }),
+  );
+  // Default: this run wins the lock. The "already running" test overrides it.
+  lockAcquired();
 });
 
 describe("syncUnsyncedDims", () => {
@@ -116,5 +150,58 @@ describe("syncUnsyncedDims", () => {
 
     expect(report).toEqual({ synced: 0, failed: 2, pending: 2 });
     expect(dim.update).not.toHaveBeenCalled();
+  });
+
+  it("skips the run when the advisory lock is already held (concurrent sync)", async () => {
+    // C1 fix: a second overlapping POST /api/sync/cc must NOT double-PATCH.
+    lockContended();
+    dim.count.mockResolvedValue(4 as never); // 4 pending; the winner will sync them
+
+    const report = await syncUnsyncedDims();
+
+    expect(report).toEqual({ synced: 0, failed: 0, pending: 4 });
+    // The guard fired before any work: no read of the unsynced set, no PATCH,
+    // no marks. The in-flight winner owns the sync.
+    expect(cc.patchProductDims).not.toHaveBeenCalled();
+    expect(dim.findMany).not.toHaveBeenCalled();
+    expect(dim.update).not.toHaveBeenCalled();
+  });
+
+  it("PATCHes each unsynced dim exactly once while holding the lock", async () => {
+    // Lock acquired (beforeEach default). Verify no double-PATCH under the lock.
+    const dims = [pendingDim(1), pendingDim(2), pendingDim(3)];
+    dim.findMany.mockResolvedValue(dims as never);
+    cc.patchProductDims.mockResolvedValue(undefined as never);
+    dim.update.mockResolvedValue({} as never);
+    dim.count.mockResolvedValue(0 as never);
+
+    const report = await syncUnsyncedDims();
+
+    expect(report).toEqual({ synced: 3, failed: 0, pending: 0 });
+    expect(cc.patchProductDims).toHaveBeenCalledTimes(3);
+    expect(dim.update).toHaveBeenCalledTimes(3);
+    const patchedIds = cc.patchProductDims.mock.calls.map((c) => c[0]);
+    expect(patchedIds).toEqual(["prod-1", "prod-2", "prod-3"]); // each once
+  });
+
+  it("keeps per-item failure isolation under the lock", async () => {
+    const dims = [pendingDim(1), pendingDim(2), pendingDim(3)];
+    dim.findMany.mockResolvedValue(dims as never);
+    cc.patchProductDims
+      .mockResolvedValueOnce(undefined as never)
+      .mockRejectedValueOnce(new Error("CC 500") as never)
+      .mockResolvedValueOnce(undefined as never);
+    dim.update.mockResolvedValue({} as never);
+    dim.count.mockResolvedValue(1 as never);
+
+    const report = await syncUnsyncedDims();
+
+    expect(report).toEqual({ synced: 2, failed: 1, pending: 1 });
+    expect(cc.patchProductDims).toHaveBeenCalledTimes(3); // loop continued
+    expect(dim.update).toHaveBeenCalledTimes(2); // only the two successes marked
+    const updatedIds = dim.update.mock.calls.map(
+      (c) => (c[0] as { where: { id: number } }).where.id,
+    );
+    expect(updatedIds).toEqual([1, 3]);
   });
 });

@@ -16,6 +16,11 @@ React 19 + TS + Vite + Tailwind + shadcn/ui / Node Express + TS / PostgreSQL 16 
 - Created: 2026-05-11
 
 ## Status
+- **2026-06-04:** Modules 01–08 ✅ built. `/compile-stress` run — integration GREEN
+  (72/72 backend + 41/41 frontend), Critical **C1 fixed** (concurrent CC-sync double-PATCH).
+  **NOT yet a production candidate / not tagged** — security hardening modules 09 / 11 / 12
+  must land before prod (Jake's sign-off call). See [STRESS_TEST_RESULTS.md](./STRESS_TEST_RESULTS.md)
+  + [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 - [MODULES.md](./MODULES.md) — module-by-module status
 - [DECISIONS.md](./DECISIONS.md) — architectural decisions
 - [LOCAL_DEPLOY.md](./LOCAL_DEPLOY.md) — local deploy gate

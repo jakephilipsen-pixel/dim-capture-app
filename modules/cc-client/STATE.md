@@ -44,6 +44,10 @@ export class CcClient {
   static fromEnv(overrides?: Partial<CcClientOptions>): CcClient;
   lookupByBarcode(barcode: string, warehouseId: string): Promise<CcProduct | null>;
   patchProductDims(productId: string, dims: CcDimPayload): Promise<void>;
+  // Added by sku-seed (03): one page of the warehouse product list. Callers
+  // paginate by incrementing `page` until a page returns < pageSize items.
+  // A 404 on the list endpoint is treated as end-of-results (empty array).
+  listProducts(warehouseId: string, page: number, pageSize: number): Promise<CcProduct[]>;
 }
 
 export interface CcClientOptions {
@@ -90,9 +94,11 @@ await ccClient.patchProductDims(product.id, { length, width, height, weight }); 
 - **Version:** `Accept-Version: 1` header on every request.
 - **Endpoints:**
   - `GET  /products?barcode={barcode}&warehouseAccountId={warehouseId}`
+  - `GET  /products?warehouseAccountId={warehouseId}&page={page}&pageSize={pageSize}` (listProducts, added by sku-seed 03)
   - `PATCH /products/{productId}` body `{ length, width, height, weight }`
-- **List parsing:** `lookupByBarcode` accepts a bare array, `{ data: [...] }`, or
-  `{ products: [...] }`; takes the first match. String-encoded numbers are coerced.
+- **List parsing:** `lookupByBarcode` (first match) and `listProducts` (whole page)
+  both accept a bare array, `{ data: [...] }`, or `{ products: [...] }`.
+  String-encoded numbers are coerced; missing dims map to `null`.
 - **Units:** mm for L/W/H, kg for weight — passed through verbatim. Callers own conversion.
 - **Rate limiter:** in-memory token bucket, 60 tokens, refills 1/sec, capped at 60.
   *Rejects* (does not queue) with `CcRateLimitError` when empty. The token is consumed

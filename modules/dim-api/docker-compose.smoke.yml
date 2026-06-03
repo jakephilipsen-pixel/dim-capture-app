@@ -1,0 +1,58 @@
+# Smoke stack for dim-api (module 04).
+#
+# Boots the REAL backend image (default CMD: prisma migrate deploy + serve)
+# against a throwaway Postgres and an in-container mock CartonCloud. The mock
+# runs the dev-only `dist/smoke/mockCc.js` from the same image — never the prod
+# CMD. No real CartonCloud is ever contacted.
+#
+# The happy path seeds SKUs (CC list pull), captures a dim, then syncs it
+# (PATCH /products/{id} on the mock CC). Host port 3010 for the backend
+# (3005/3007/3009 avoided to dodge the dev stack and other modules' smokes on
+# Jake's laptop). Postgres and the mock CC are internal-only (no host ports).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dimcapture
+      POSTGRES_USER: gocold
+      POSTGRES_PASSWORD: gocold
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mock-cc:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/mockCc.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:9099/products?barcode=9311111000011&warehouseAccountId=wh-forage' | grep -q cc-1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    ports:
+      - "3010:3005"
+    environment:
+      NODE_ENV: production
+      PORT: "3005"
+      DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
+      CC_API_KEY: smoke-key
+      CC_TENANT_ID: smoke-tenant
+      CC_WAREHOUSE_ID: wh-forage
+      CC_BASE_URL: http://mock-cc:9099
+      FRONTEND_URL: http://localhost:5175
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-cc:
+        condition: service_healthy

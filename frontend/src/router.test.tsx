@@ -15,11 +15,18 @@ vi.mock('@/context/ProgressContext', () => ({
   })),
 }))
 
-// The real Capture page (module 06) mounts at "/" and its RecentCaptures
-// calls GET /api/dims — stub it so routing tests make no network call.
+// The real pages (modules 06/07) fetch on mount — stub the calls they make so
+// routing tests do no network I/O.
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
-  return { ...actual, api: { ...actual.api, getDims: vi.fn().mockResolvedValue([]) } }
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      getDims: vi.fn().mockResolvedValue([]),
+      getSkus: vi.fn().mockResolvedValue({ total: 0, captured: 0, skus: [] }),
+    },
+  }
 })
 
 function renderAt(path: string) {
@@ -34,16 +41,16 @@ describe('routing', () => {
     expect(screen.getByLabelText(/search barcode or sku name/i)).toBeInTheDocument()
   })
 
-  it('renders the Progress placeholder at /progress', () => {
+  it('renders the Progress page at /progress', async () => {
     renderAt('/progress')
+    expect(await screen.findByText(/no skus match/i)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Progress' })).toBeInTheDocument()
-    expect(screen.getByText('/progress')).toBeInTheDocument()
   })
 
-  it('renders the Review placeholder at /review', () => {
+  it('renders the Review page at /review', async () => {
     renderAt('/review')
+    expect(await screen.findByText(/no captures yet/i)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Review' })).toBeInTheDocument()
-    expect(screen.getByText('/review')).toBeInTheDocument()
   })
 
   it('renders a Not found placeholder for unknown routes', () => {

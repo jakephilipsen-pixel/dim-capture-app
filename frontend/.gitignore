@@ -19,3 +19,6 @@ coverage
 .env
 .env.*
 !.env.example
+
+# Vite cache
+.vite

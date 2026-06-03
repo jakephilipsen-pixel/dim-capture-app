@@ -90,6 +90,11 @@ export interface SyncReport {
   pending: number
 }
 
+/** A row in GET /api/dims — a Dim joined with its SKU's name + barcode. */
+export interface DimWithSku extends Dim {
+  sku: { name: string; barcode: string }
+}
+
 // ---------------------------------------------------------------------------
 // Error type + request helper
 // ---------------------------------------------------------------------------
@@ -164,6 +169,10 @@ export const api = {
 
   getSkuByBarcode(barcode: string): Promise<SkuDetail> {
     return request<SkuDetail>(`/api/skus/${encodeURIComponent(barcode)}`)
+  },
+
+  getDims(): Promise<DimWithSku[]> {
+    return request<DimWithSku[]>('/api/dims')
   },
 
   saveDim(payload: SaveDimPayload): Promise<Dim> {

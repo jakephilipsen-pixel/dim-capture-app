@@ -1,0 +1,85 @@
+# Smoke stack for docker-deploy (module 08).
+#
+# This proves the PRODUCTION images boot and wire together as they will on the
+# NUC: throwaway Postgres, the REAL backend image, and the REAL frontend image
+# built with VITE_API_URL="" (relative API base) so the nginx /api proxy is the
+# path under test. An in-container mock CartonCloud stands in for CC so the seed
+# (needed to have a SKU to attach a dim to) works without real credentials.
+#
+# The happy-path POSTs a dim and confirms it saved (the brief's requirement),
+# AND hits /api/health *through the frontend* to prove single-origin proxying.
+#
+# Host ports: backend 3012, frontend 5179 (Postgres + mock-cc internal-only).
+# These dodge the dev stack (3005/5175) and the other modules' smoke ports
+# (06: 3010/5177, 07: 3011/5178).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dimcapture
+      POSTGRES_USER: gocold
+      POSTGRES_PASSWORD: gocold
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mock-cc:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/mockCc.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:9099/products?barcode=9311111000011&warehouseAccountId=wh-forage' | grep -q cc-1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    ports:
+      - "3012:3005"
+    environment:
+      NODE_ENV: production
+      PORT: "3005"
+      DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
+      CC_API_KEY: smoke-key
+      CC_TENANT_ID: smoke-tenant
+      CC_WAREHOUSE_ID: wh-forage
+      CC_BASE_URL: http://mock-cc:9099
+      FRONTEND_URL: http://localhost:5179
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-cc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/health | grep -q '\"db\":\"connected\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        # Relative API base — the same way production builds it, so this smoke
+        # exercises the nginx /api proxy that the deploy depends on.
+        VITE_API_URL: ""
+    ports:
+      - "5179:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 10

@@ -1,0 +1,69 @@
+# Production stack for dim-capture-app — runs on the NUC, fronted by Caddy at
+# http://dims.gocold.local.
+#
+# Single origin: Caddy (host) → frontend:80 (nginx). The frontend serves the
+# static PWA and proxies /api/* to the backend over the compose network, so the
+# browser never reaches the backend host directly (the frontend is built with a
+# relative API base — VITE_API_URL=""). The backend is still published on 3005
+# for host-side health checks and migrations.
+#
+# Bring up:  cp .env.example .env  &&  edit secrets  &&  docker compose up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: dimcapture
+      POSTGRES_USER: gocold
+      POSTGRES_PASSWORD: gocold
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3005:3005"
+    # All app + CC config comes from .env (DATABASE_URL must point at the
+    # internal host `postgres:5432`, not localhost — see .env.example).
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/health | grep -q '\"db\":\"connected\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Relative API base → single origin via the nginx /api proxy.
+        VITE_API_URL: ""
+    restart: unless-stopped
+    ports:
+      - "5175:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

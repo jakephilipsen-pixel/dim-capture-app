@@ -1,5 +1,6 @@
 # Health check endpoints - one per line
 # Format: <service-name> <url-or-path>
-# Example:
-#   api http://localhost:8787/health
-#   worker http://localhost:8788/health
+# Read by scripts/healthcheck-all.sh. Override the host with NUC_URL to check the
+# NUC instead of localhost:
+#   NUC_URL=http://dims.gocold.local ./scripts/healthcheck-all.sh
+api http://localhost:3005/api/health

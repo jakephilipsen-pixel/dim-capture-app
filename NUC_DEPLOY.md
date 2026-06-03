@@ -56,13 +56,31 @@ ssh nuc "cd /opt/dim-capture-app && docker compose -f docker-compose.yml run --r
 ```
 
 ### Stage 5: Caddy reverse proxy registration
-If this project gets a subdomain under `rolodex-ai.com`:
+This project is LAN-only at `http://dims.gocold.local` (no Cloudflare tunnel, no
+public subdomain). Caddy runs on the NUC host and proxies to the published
+frontend port (5175 → frontend container :80); the frontend's nginx then proxies
+`/api/*` to the backend, so this one fragment covers the whole app (single origin).
+
+First deploy — install the fragment and ensure the main Caddyfile imports it:
 ```bash
-ssh nuc "cat /etc/caddy/Caddyfile.d/dim-capture-app.caddy"  # verify exists
+# Copy the repo's fragment into Caddy's drop-in dir
+ssh nuc "sudo cp /opt/dim-capture-app/caddy/dims.gocold.local.caddy /etc/caddy/Caddyfile.d/"
+# Confirm the main Caddyfile imports the drop-in dir (one-time):
+ssh nuc "grep -q 'import /etc/caddy/Caddyfile.d/\*' /etc/caddy/Caddyfile || echo 'ADD: import /etc/caddy/Caddyfile.d/*'"
+ssh nuc "caddy validate --config /etc/caddy/Caddyfile"
 ssh nuc "sudo systemctl reload caddy"
 ```
 
-If first deploy, the Caddyfile fragment is generated from the template and copied across.
+Subsequent deploys — verify it's present and reload:
+```bash
+ssh nuc "cat /etc/caddy/Caddyfile.d/dims.gocold.local.caddy"  # verify exists
+ssh nuc "sudo systemctl reload caddy"
+```
+
+**One-time network setup (not automated):** local DNS must resolve
+`dims.gocold.local` → the NUC's LAN IP. Add a DNS override on the warehouse router
+(DHCP static host) or in `dnsmasq` (`address=/dims.gocold.local/<NUC-IP>`). Until
+this exists, the app is reachable only via the NUC IP directly.
 
 ### Stage 6: Post-deploy health check
 ```bash

@@ -8,6 +8,11 @@ RUN npm ci
 
 # Build the PWA (tsc -b && vite build → dist/, includes sw.js + manifest).
 COPY . .
+# API base is baked in at build time. Default "" → api.ts uses a relative /api
+# base and the nginx layer below proxies it to the backend (single origin).
+# Override only if the API must live on a separate origin.
+ARG VITE_API_URL=""
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 # ---- runtime stage ---------------------------------------------------------

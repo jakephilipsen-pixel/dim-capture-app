@@ -1,0 +1,23 @@
+# Caddy fragment for dim-capture-app on the NUC.
+#
+# Install: copy to /etc/caddy/Caddyfile.d/dims.gocold.local.caddy on the NUC, then
+#   sudo systemctl reload caddy
+# (The NUC's main Caddyfile must `import /etc/caddy/Caddyfile.d/*`.)
+#
+# Caddy runs on the NUC *host*, so it reaches the frontend via the published
+# host port 5175 → frontend container :80 (it cannot resolve the compose service
+# name `frontend`). The frontend's nginx then proxies /api/* to the backend, so
+# this single reverse_proxy covers the whole app (single origin).
+#
+# LAN-only, no TLS: `http://` scheme keeps Caddy from attempting to provision a
+# public certificate for a non-routable .local name. Local DNS (router DHCP
+# override or dnsmasq) must resolve dims.gocold.local → the NUC's LAN IP; that's
+# a one-time network setup step, not done here.
+
+http://dims.gocold.local {
+	reverse_proxy localhost:5175
+
+	log {
+		output file /var/log/caddy/dims.gocold.local.log
+	}
+}

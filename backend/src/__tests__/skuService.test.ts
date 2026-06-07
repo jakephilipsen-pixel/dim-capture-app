@@ -16,11 +16,23 @@ vi.mock("../lib/db", () => ({
 
 vi.mock("../services/ccClient", () => ({
   ccClient: { listProducts: vi.fn(), lookupByBarcode: vi.fn() },
+  CcApiError: class CcApiError extends Error {
+    constructor(message: string, public readonly statusCode: number) {
+      super(message);
+      this.name = "CcApiError";
+    }
+  },
+  CcRateLimitError: class CcRateLimitError extends Error {
+    constructor(message = "rate limit") {
+      super(message);
+      this.name = "CcRateLimitError";
+    }
+  },
 }));
 
 import { AppError } from "../lib/errors";
 import { prisma } from "../lib/db";
-import { ccClient } from "../services/ccClient";
+import { ccClient, CcApiError, CcRateLimitError } from "../services/ccClient";
 import {
   getProgress,
   getSkuByBarcode,
@@ -264,6 +276,34 @@ describe("getSkuByBarcode", () => {
     });
 
     await expect(getSkuByBarcode("999")).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  // S3a — CcApiError/CcRateLimitError on the CC fallback path must map to
+  // safe AppErrors (no CC message echoed; not a 500).
+  it("maps a CcApiError on CC fallback to a 502 AppError — S3a", async () => {
+    sku.findUnique.mockResolvedValue(null as never);
+    cc.lookupByBarcode.mockRejectedValue(
+      new CcApiError("CC returned 503 <!DOCTYPE html>...", 503),
+    );
+
+    const err = await getSkuByBarcode("xxx").catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(502);
+    // CC message must not be forwarded to the caller.
+    expect(err.message).not.toContain("<!DOCTYPE");
+    expect(err.message).not.toContain("CC returned");
+  });
+
+  it("maps a CcRateLimitError on CC fallback to a 503 AppError — S3a", async () => {
+    sku.findUnique.mockResolvedValue(null as never);
+    cc.lookupByBarcode.mockRejectedValue(
+      new CcRateLimitError("CartonCloud rate limit exceeded (60 req/min)"),
+    );
+
+    const err = await getSkuByBarcode("xxx").catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(503);
+    expect(err.message).not.toContain("CartonCloud rate limit exceeded");
   });
 });
 

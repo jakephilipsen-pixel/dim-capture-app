@@ -11,7 +11,7 @@
 import { prisma } from "../lib/db";
 import { AppError } from "../lib/errors";
 import { logger } from "../middleware/logger";
-import { ccClient, type CcProduct } from "./ccClient";
+import { ccClient, CcApiError, CcRateLimitError, type CcProduct } from "./ccClient";
 
 const log = logger.child({ module: "skuService" });
 
@@ -168,7 +168,24 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
     };
   }
 
-  const product = await ccClient.lookupByBarcode(barcode, warehouseId());
+  // S3a — CcApiError/CcRateLimitError must not propagate as non-AppError: they
+  // would reach errorHandler as unknown errors and (a) leak CC error strings and
+  // (b) return 500. Map them to safe AppErrors before they leave this service.
+  let product: CcProduct | null;
+  try {
+    product = await ccClient.lookupByBarcode(barcode, warehouseId());
+  } catch (err) {
+    if (err instanceof CcRateLimitError) {
+      log.warn({ barcode }, "CC rate limit hit during barcode fallback");
+      throw new AppError("Product lookup unavailable — upstream rate limit", 503);
+    }
+    if (err instanceof CcApiError) {
+      log.error({ barcode, ccStatus: err.statusCode }, "CC API error during barcode fallback");
+      throw new AppError("Product lookup failed — upstream error", 502);
+    }
+    throw err;
+  }
+
   if (!product || !product.id || !product.barcode) {
     throw new AppError(`SKU not found for barcode ${barcode}`, 404);
   }

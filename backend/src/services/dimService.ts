@@ -34,15 +34,67 @@ export interface DimWithSku {
 }
 
 /**
- * `POST /api/dims` body. All four measurements must be strictly positive
- * (rejected → 422), `skuId`/`measuredBy` non-blank, `notes` optional.
+ * Sensible upper bounds for dimension values.
+ *
+ * M5 — "only > 0" accepted absurd values like 1e308. A 100 m (100,000 mm)
+ * cap covers any realistic carton in a 3PL cold-store; 1,000 kg covers any
+ * pallet a refrigerated truck can legally carry in Australia.
+ *
+ * M6 — `.finite()` produces a clear "Number must be finite" message when
+ * JSON `Infinity`/`-Infinity` reaches the schema (previously zod yielded the
+ * unhelpful "Expected number, received number" because Infinity is typeof number).
+ */
+const DIM_MM_MAX = 100_000; // 100 m — no single carton in this environment exceeds this
+const WEIGHT_KG_MAX = 1_000; // 1,000 kg — maximum pallet weight on an Australian B-double
+
+/**
+ * Build a finite-and-bounded number field for a named dimension.
+ *
+ * In zod v4 `.finite()` is a no-op (the check runs at the type level and
+ * emits the opaque "expected number, received number" message for Infinity).
+ * We override that via the `error` callback so non-finite inputs produce a
+ * clear "must be a finite number" message (M6), and then chain `.positive()`
+ * and `.max()` for the positivity + upper-bound checks (M5).
+ */
+const dimMmField = (name: string) =>
+  z
+    .number({
+      error: (issue) => {
+        // Zod v4 surfaces Infinity/-Infinity as invalid_type before any
+        // refinements; detect them here so the user gets a useful message.
+        if (!Number.isFinite(issue.input as number) && typeof issue.input === "number") {
+          return `${name} must be a finite number`;
+        }
+        return `${name} must be a number`;
+      },
+    })
+    .positive(`${name} must be greater than 0`)
+    .max(DIM_MM_MAX, `${name} must be at most ${DIM_MM_MAX} mm`);
+
+/** Shared finite-and-bounded validator for a weight in kilograms. */
+const weightKgField = z
+  .number({
+    error: (issue) => {
+      if (!Number.isFinite(issue.input as number) && typeof issue.input === "number") {
+        return "weightKg must be a finite number";
+      }
+      return "weightKg must be a number";
+    },
+  })
+  .positive("weightKg must be greater than 0")
+  .max(WEIGHT_KG_MAX, `weightKg must be at most ${WEIGHT_KG_MAX} kg`);
+
+/**
+ * `POST /api/dims` body. All four measurements must be strictly positive and
+ * within sanity bounds (rejected → 422), `skuId`/`measuredBy` non-blank,
+ * `notes` optional.
  */
 export const captureSchema = z.object({
   skuId: z.string().trim().min(1, "skuId is required"),
-  lengthMm: z.number().positive("lengthMm must be greater than 0"),
-  widthMm: z.number().positive("widthMm must be greater than 0"),
-  heightMm: z.number().positive("heightMm must be greater than 0"),
-  weightKg: z.number().positive("weightKg must be greater than 0"),
+  lengthMm: dimMmField("lengthMm"),
+  widthMm: dimMmField("widthMm"),
+  heightMm: dimMmField("heightMm"),
+  weightKg: weightKgField,
   measuredBy: z.string().trim().min(1, "measuredBy is required"),
   notes: z.string().trim().optional(),
 });

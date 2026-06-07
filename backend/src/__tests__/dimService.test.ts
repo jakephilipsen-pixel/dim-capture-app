@@ -99,6 +99,56 @@ describe("saveDim", () => {
     expect(err.statusCode).toBe(422);
   });
 
+  // M5 — upper sanity bound: dims > 100,000 mm or weight > 1,000 kg rejected.
+  it("rejects a length above the upper sanity bound (> 100000 mm) with 422 — M5", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, lengthMm: 100001 }));
+    expect(err.statusCode).toBe(422);
+  });
+
+  it("rejects a width above the upper sanity bound with 422 — M5", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, widthMm: 1e308 }));
+    expect(err.statusCode).toBe(422);
+  });
+
+  it("rejects a height above the upper sanity bound with 422 — M5", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, heightMm: 100001 }));
+    expect(err.statusCode).toBe(422);
+  });
+
+  it("rejects a weight above the upper sanity bound (> 1000 kg) with 422 — M5", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, weightKg: 1001 }));
+    expect(err.statusCode).toBe(422);
+  });
+
+  it("accepts dims exactly at the upper bound — M5", async () => {
+    sku.findUnique.mockResolvedValue({ id: "prod-1" } as never);
+    dim.upsert.mockResolvedValue({ id: 1 } as never);
+    // Must NOT throw — exactly at the limit.
+    await expect(
+      saveDim({ ...validCapture, lengthMm: 100000, widthMm: 100000, heightMm: 100000, weightKg: 1000 }),
+    ).resolves.toBeDefined();
+  });
+
+  // M6 — non-finite numbers produce a clear error message (not "expected number, received number").
+  it("rejects JSON Infinity in a dim field with a clear 'finite' message — M6", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, lengthMm: Infinity }));
+    expect(err.statusCode).toBe(422);
+    expect(err.message.toLowerCase()).toContain("finite");
+  });
+
+  it("rejects -Infinity with a finite message — M6", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, widthMm: -Infinity }));
+    expect(err.statusCode).toBe(422);
+    expect(err.message.toLowerCase()).toContain("finite");
+  });
+
+  it("rejects NaN with a clear message — M6", async () => {
+    const err = await catchAppError(() => saveDim({ ...validCapture, heightMm: NaN }));
+    expect(err.statusCode).toBe(422);
+    // NaN is not a number in zod's view — just confirm it's a 422.
+    expect(err.statusCode).toBe(422);
+  });
+
   it("rejects an unknown skuId with 404", async () => {
     sku.findUnique.mockResolvedValue(null as never);
     const err = await catchAppError(() => saveDim(validCapture));
@@ -159,5 +209,17 @@ describe("updateDim", () => {
     const err = await catchAppError(() => updateDim(7, { ...correction, lengthMm: 0 }));
     expect(err.statusCode).toBe(422);
     expect(dim.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("rejects an over-bound correction dim with 422 — M5", async () => {
+    const err = await catchAppError(() => updateDim(7, { ...correction, lengthMm: 200000 }));
+    expect(err.statusCode).toBe(422);
+    expect(dim.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-finite correction dim with a clear message — M6", async () => {
+    const err = await catchAppError(() => updateDim(7, { ...correction, weightKg: Infinity }));
+    expect(err.statusCode).toBe(422);
+    expect(err.message.toLowerCase()).toContain("finite");
   });
 });

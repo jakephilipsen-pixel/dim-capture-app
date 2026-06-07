@@ -115,3 +115,37 @@ runs read the same unsynced set and both PATCH every dim.
   500, integrity intact; CC-down during sync → `{0,N,N}` then retry succeeds, no data loss; backend
   restart → migrations non-destructive, data survived; backend-down → frontend serves degraded shell,
   nginx proxy returns clean 502; cold boot recovers via `depends_on` ordering. No process crash anywhere.
+
+---
+
+## /compile-stress re-run — 2026-06-08 (post-hardening 09–13)
+
+**Tree:** `feature/hardening` (= integrated 8 modules + C1 fix + hardening 09,10,11,12,13).
+**Stack:** production images via `modules/docker-deploy/docker-compose.smoke.yml` (`-p dimcap-cs`)
+— postgres 16 + in-container mock CartonCloud + real backend (:3012) + real frontend (:5179).
+No real CartonCloud contacted (`CC_BASE_URL=http://mock-cc:9099`).
+
+### Integration: GREEN
+- `docker compose build` (prod images): OK.
+- Stack boot + health: **all 4 services healthy** (frontend now healthy — M4 fixed).
+- Backend `tsc --noEmit` clean; `npm test` **134/134**. Frontend `tsc -b` clean; `npm test` **41/41**.
+- E2E happy path (with `X-Sync-Key`): seed → list skus → capture → **re-capture** → sync(mock) → `{synced:1,failed:0,pending:0}`, progress `captured:1, syncedToCC:1`. ✅
+
+### Original CRITICAL — resolved
+- **C1** (concurrent sync double-PATCH): resolved earlier (advisory lock), unchanged here.
+
+### Hardening findings — verified resolved on the live stack
+- **S1** unknown error → generic `{"error":"Internal server error"}`, no DSN/stack leak (forced 500 path). ✅
+- **S2** malformed JSON body → **400** (not 500). ✅
+- **S5** production `docker-compose.yml` has no backend host port (single-origin only). ✅ (static)
+- **S6** `POST /api/sync/cc` & `/api/admin/seed` without `X-Sync-Key` → **401**; with key → handler reached; `SYNC_SECRET` unset → 503 fail-closed (unit). GET routes + `/api/dims` ungated → 200. ✅
+- **S7** frontend nginx returns `X-Frame-Options: DENY`, `Content-Security-Policy`, `X-Content-Type-Options: nosniff`. ✅
+- **M3** no `X-Powered-By`; `Server: nginx` (no version). ✅
+- **M4** frontend container reports **healthy**. ✅
+
+### Regression caught + fixed by this re-run
+- **Blocking advisory lock P2010** (`pg_advisory_xact_lock` returns SQL `void`; `$queryRaw` could not
+  deserialise → every dim capture 500'd in the real stack though unit tests passed). Fixed: use
+  `$executeRaw` for the blocking lock. Re-verified live: capture 200, re-capture 200, missing-sku 404.
+
+**Verdict:** GREEN. Ready for `/deploy-local` (which requires Jake's manual sign-off).

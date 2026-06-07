@@ -11,7 +11,7 @@
 import { prisma } from "../lib/db";
 import { AppError } from "../lib/errors";
 import { logger } from "../middleware/logger";
-import { ccClient, CcApiError, CcRateLimitError, type CcProduct } from "./ccClient";
+import { ccClient, CcApiError, CcRateLimitError, CcTimeoutError, type CcProduct } from "./ccClient";
 
 const log = logger.child({ module: "skuService" });
 
@@ -88,7 +88,28 @@ export async function seedSkus(): Promise<SeedReport> {
   let ccDimsPresent = 0;
 
   for (;;) {
-    const products = await ccClient.listProducts(wh, page, SEED_PAGE_SIZE);
+    // M2a: CcRateLimitError from the seed bucket → 429 (our limiter rejected it,
+    // not CC). CcTimeoutError/CcApiError → 502/504 (upstream problem). These are
+    // not per-item failures — they abort the whole seed run so the caller knows
+    // to retry later.
+    let products;
+    try {
+      products = await ccClient.listProducts(wh, page, SEED_PAGE_SIZE);
+    } catch (err) {
+      if (err instanceof CcRateLimitError) {
+        log.warn({ page }, "seed rate limit hit — seed bucket exhausted");
+        throw new AppError("Seed unavailable — rate limit exceeded. Try again shortly.", 429);
+      }
+      if (err instanceof CcTimeoutError) {
+        log.error({ page }, "CC request timed out during seed");
+        throw new AppError("Seed failed — CartonCloud request timed out", 504);
+      }
+      if (err instanceof CcApiError) {
+        log.error({ page, ccStatus: err.statusCode }, "CC API error during seed");
+        throw new AppError("Seed failed — upstream CartonCloud error", 502);
+      }
+      throw err;
+    }
     if (products.length === 0) break;
     pages += 1;
     fetched += products.length;
@@ -171,6 +192,8 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
   // S3a — CcApiError/CcRateLimitError must not propagate as non-AppError: they
   // would reach errorHandler as unknown errors and (a) leak CC error strings and
   // (b) return 500. Map them to safe AppErrors before they leave this service.
+  // CcTimeoutError (module 10): checked before the generic CcApiError branch since
+  // it extends CcApiError but warrants a more precise 504 status.
   let product: CcProduct | null;
   try {
     product = await ccClient.lookupByBarcode(barcode, warehouseId());
@@ -178,6 +201,10 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
     if (err instanceof CcRateLimitError) {
       log.warn({ barcode }, "CC rate limit hit during barcode fallback");
       throw new AppError("Product lookup unavailable — upstream rate limit", 503);
+    }
+    if (err instanceof CcTimeoutError) {
+      log.warn({ barcode }, "CC request timed out during barcode fallback");
+      throw new AppError("Product lookup failed — upstream timeout", 504);
     }
     if (err instanceof CcApiError) {
       log.error({ barcode, ccStatus: err.statusCode }, "CC API error during barcode fallback");

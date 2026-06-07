@@ -8,8 +8,19 @@
  * `https://app.cartoncloud.com.au/api/v1`. Tenant is sent as the
  * `X-Tenant-Id` header on every request (see DECISIONS.md, 2026-06-03).
  *
- * A token-bucket limiter (60 tokens, refill 1/sec) guards every outbound
- * call and *rejects* — does not queue — with `CcRateLimitError` when empty.
+ * Rate limiting (module 10 cc-resilience):
+ *   Two separate token buckets guard outbound calls:
+ *   - syncBucket: guards lookupByBarcode + patchProductDims (user lookups + syncs).
+ *   - seedBucket: guards listProducts (admin seed pulls).
+ *   Default budgets: sync=40 tokens/min, seed=20 tokens/min → combined ≤ 60/min,
+ *   which respects CartonCloud's 60 req/min tenant ceiling. Both buckets reject
+ *   (do not queue) with `CcRateLimitError` when empty.
+ *
+ * Fetch timeouts (module 10 cc-resilience):
+ *   Every fetch call receives an `AbortSignal.timeout(timeoutMs)`. A timed-out
+ *   or aborted fetch rejects with a DOMException; that is caught and converted to
+ *   `CcTimeoutError extends CcApiError` (statusCode 504). The raw DOMException
+ *   never escapes to callers.
  *
  * Units are passed through verbatim: CC expects mm for dims and kg for
  * weight. This client does NOT convert; callers own unit handling.
@@ -23,6 +34,22 @@ export const CC_DEFAULT_BASE_URL = "https://app.cartoncloud.com.au/api/v1";
 
 /** CC API schema version sent on every request. */
 const CC_ACCEPT_VERSION = "1";
+
+/**
+ * Default fetch timeout in milliseconds. Overridable via `CC_TIMEOUT_MS`.
+ * 12 000 ms gives CC a full 12 s to respond, well above typical latency but
+ * short enough to prevent an indefinite hang on `POST /api/sync/cc` (S4).
+ */
+export const CC_DEFAULT_TIMEOUT_MS = 12_000;
+
+/**
+ * Default token-budget split between the sync path and the seed path.
+ * seed + sync MUST NOT exceed CC's 60 req/min tenant ceiling.
+ * seed=20: admin seed pulls are infrequent; 20/min is ample for a ~400-SKU paginated pull.
+ * sync=40: the critical sync+lookup path gets the larger share.
+ */
+export const CC_DEFAULT_SYNC_CAPACITY = 40;
+export const CC_DEFAULT_SEED_CAPACITY = 20;
 
 /** A CartonCloud product as this app cares about it. Dims/weight are nullable
  *  because a product may have no dimensions captured in CC yet. */
@@ -65,6 +92,21 @@ export class CcApiError extends Error {
   }
 }
 
+/**
+ * Raised when a CC fetch is aborted by `AbortSignal.timeout()` or any
+ * AbortSignal (S4 fix). Extends `CcApiError` with `statusCode: 504` so
+ * callers that handle `CcApiError` generically also handle timeouts without
+ * changes, while callers that need to distinguish timeouts can `instanceof
+ * CcTimeoutError`. The raw DOMException is never exposed to callers.
+ */
+export class CcTimeoutError extends CcApiError {
+  constructor(message = "CartonCloud request timed out") {
+    super(message, 504);
+    this.name = "CcTimeoutError";
+    Object.setPrototypeOf(this, CcTimeoutError.prototype);
+  }
+}
+
 /** Raised when a PATCH targets a product id CC doesn't know (404). */
 export class CcNotFoundError extends Error {
   constructor(message = "CartonCloud product not found") {
@@ -79,10 +121,31 @@ export interface CcClientOptions {
   apiKey: string;
   tenantId: string;
   baseUrl?: string;
-  /** Token-bucket capacity. Default 60. */
+  /**
+   * Sync-path token-bucket capacity (lookupByBarcode + patchProductDims).
+   * Default 40. Combined with seedCapacity MUST NOT exceed 60 (CC tenant limit).
+   */
+  syncCapacity?: number;
+  /** Sync-path tokens refilled per second. Default 1 (→ 40/min at default capacity). */
+  syncRefillPerSec?: number;
+  /**
+   * Seed-path token-bucket capacity (listProducts).
+   * Default 20. Combined with syncCapacity MUST NOT exceed 60 (CC tenant limit).
+   */
+  seedCapacity?: number;
+  /** Seed-path tokens refilled per second. Default 1 (→ 20/min at default capacity). */
+  seedRefillPerSec?: number;
+  /**
+   * @deprecated Use syncCapacity instead. Kept for backwards compatibility with
+   * existing tests that pass `capacity` — treated as syncCapacity when provided
+   * without syncCapacity (so old tests pass unchanged).
+   * @internal
+   */
   capacity?: number;
-  /** Tokens refilled per second. Default 1 (→ 60/min). */
+  /** @deprecated Use syncRefillPerSec. @internal */
   refillPerSec?: number;
+  /** Fetch timeout in milliseconds. Default CC_DEFAULT_TIMEOUT_MS (12 000). */
+  timeoutMs?: number;
   /** Defaults to global `fetch` (Node 22). */
   fetchImpl?: typeof fetch;
   /** Monotonic clock in ms. Defaults to `Date.now`. */
@@ -166,7 +229,9 @@ export class CcClient {
   private readonly apiKey: string;
   private readonly tenantId: string;
   private readonly baseUrl: string;
-  private readonly bucket: TokenBucket;
+  private readonly syncBucket: TokenBucket;
+  private readonly seedBucket: TokenBucket;
+  private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: CcClientOptions) {
@@ -174,11 +239,22 @@ export class CcClient {
     this.tenantId = opts.tenantId;
     this.baseUrl = (opts.baseUrl ?? CC_DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.bucket = new TokenBucket(
-      opts.capacity ?? 60,
-      opts.refillPerSec ?? 1,
-      opts.now ?? Date.now,
-    );
+    this.timeoutMs = opts.timeoutMs ?? Number(process.env.CC_TIMEOUT_MS ?? CC_DEFAULT_TIMEOUT_MS);
+
+    const clockFn = opts.now ?? Date.now;
+
+    // Backwards-compat: if the deprecated `capacity`/`refillPerSec` are present
+    // and the new per-path options are absent, apply capacity to the sync bucket
+    // (the original meaning) and leave the seed bucket at its default.
+    // This keeps all pre-module-10 tests passing without modification.
+    const syncCap =
+      opts.syncCapacity ?? (opts.capacity !== undefined ? opts.capacity : CC_DEFAULT_SYNC_CAPACITY);
+    const syncRefill = opts.syncRefillPerSec ?? opts.refillPerSec ?? 1;
+    const seedCap = opts.seedCapacity ?? CC_DEFAULT_SEED_CAPACITY;
+    const seedRefill = opts.seedRefillPerSec ?? 1;
+
+    this.syncBucket = new TokenBucket(syncCap, syncRefill, clockFn);
+    this.seedBucket = new TokenBucket(seedCap, seedRefill, clockFn);
   }
 
   /** Build from `CC_*` env vars. Does not throw on missing creds at construction
@@ -203,18 +279,40 @@ export class CcClient {
     return h;
   }
 
-  /** Consume a token or throw. Also guards against an unconfigured client. */
-  private guard(): void {
+  /**
+   * Consume a token from the appropriate bucket or throw CcRateLimitError.
+   * Also guards against an unconfigured client.
+   *
+   * @param path - "sync" (lookupByBarcode + patchProductDims) or "seed" (listProducts).
+   */
+  private guard(path: "sync" | "seed"): void {
     if (!this.apiKey || !this.tenantId) {
       throw new CcApiError(
         "CartonCloud client not configured (CC_API_KEY / CC_TENANT_ID missing)",
         500,
       );
     }
-    if (!this.bucket.take()) {
-      log.warn("rate limit bucket empty — rejecting request");
+    const bucket = path === "seed" ? this.seedBucket : this.syncBucket;
+    if (!bucket.take()) {
+      log.warn({ path }, "rate limit bucket empty — rejecting request");
       throw new CcRateLimitError();
     }
+  }
+
+  /**
+   * Convert an AbortError or TimeoutError DOMException thrown by a timed-out
+   * fetch into a CcTimeoutError. Any other error is re-thrown as-is.
+   * This is called in every fetch catch block (S4 fix).
+   */
+  private handleFetchError(err: unknown): never {
+    if (
+      err instanceof DOMException &&
+      (err.name === "AbortError" || err.name === "TimeoutError")
+    ) {
+      log.warn("CartonCloud request timed out or was aborted");
+      throw new CcTimeoutError();
+    }
+    throw err;
   }
 
   /**
@@ -224,15 +322,21 @@ export class CcClient {
    * result or 404). Throws `CcApiError` on any other non-2xx response.
    */
   async lookupByBarcode(barcode: string, warehouseId: string): Promise<CcProduct | null> {
-    this.guard();
+    this.guard("sync");
     const url = new URL(`${this.baseUrl}/products`);
     url.searchParams.set("barcode", barcode);
     url.searchParams.set("warehouseAccountId", warehouseId);
 
-    const res = await this.fetchImpl(url.toString(), {
-      method: "GET",
-      headers: this.headers(false),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url.toString(), {
+        method: "GET",
+        headers: this.headers(false),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      this.handleFetchError(err);
+    }
 
     if (res.status === 404) return null;
     if (!res.ok) {
@@ -261,16 +365,22 @@ export class CcClient {
     page: number,
     pageSize: number,
   ): Promise<CcProduct[]> {
-    this.guard();
+    this.guard("seed");
     const url = new URL(`${this.baseUrl}/products`);
     url.searchParams.set("warehouseAccountId", warehouseId);
     url.searchParams.set("page", String(page));
     url.searchParams.set("pageSize", String(pageSize));
 
-    const res = await this.fetchImpl(url.toString(), {
-      method: "GET",
-      headers: this.headers(false),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url.toString(), {
+        method: "GET",
+        headers: this.headers(false),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      this.handleFetchError(err);
+    }
 
     // A 404 on the list endpoint means "no such page" — treat as the end of
     // the result set (empty page) rather than an error.
@@ -292,19 +402,25 @@ export class CcClient {
    * `CcApiError` on any other non-2xx response.
    */
   async patchProductDims(productId: string, dims: CcDimPayload): Promise<void> {
-    this.guard();
+    this.guard("sync");
     const url = `${this.baseUrl}/products/${encodeURIComponent(productId)}`;
 
-    const res = await this.fetchImpl(url, {
-      method: "PATCH",
-      headers: this.headers(true),
-      body: JSON.stringify({
-        length: dims.length,
-        width: dims.width,
-        height: dims.height,
-        weight: dims.weight,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify({
+          length: dims.length,
+          width: dims.width,
+          height: dims.height,
+          weight: dims.weight,
+        }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (err) {
+      this.handleFetchError(err);
+    }
 
     if (res.status === 404) {
       throw new CcNotFoundError(`product ${productId} not found in CartonCloud`);

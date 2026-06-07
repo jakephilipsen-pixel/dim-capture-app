@@ -14,25 +14,39 @@ vi.mock("../lib/db", () => ({
   },
 }));
 
-vi.mock("../services/ccClient", () => ({
-  ccClient: { listProducts: vi.fn(), lookupByBarcode: vi.fn() },
-  CcApiError: class CcApiError extends Error {
+vi.mock("../services/ccClient", () => {
+  class CcApiError extends Error {
     constructor(message: string, public readonly statusCode: number) {
       super(message);
       this.name = "CcApiError";
+      Object.setPrototypeOf(this, CcApiError.prototype);
     }
-  },
-  CcRateLimitError: class CcRateLimitError extends Error {
+  }
+  class CcTimeoutError extends CcApiError {
+    constructor(message = "timeout") {
+      super(message, 504);
+      this.name = "CcTimeoutError";
+      Object.setPrototypeOf(this, CcTimeoutError.prototype);
+    }
+  }
+  class CcRateLimitError extends Error {
     constructor(message = "rate limit") {
       super(message);
       this.name = "CcRateLimitError";
+      Object.setPrototypeOf(this, CcRateLimitError.prototype);
     }
-  },
-}));
+  }
+  return {
+    ccClient: { listProducts: vi.fn(), lookupByBarcode: vi.fn() },
+    CcApiError,
+    CcTimeoutError,
+    CcRateLimitError,
+  };
+});
 
 import { AppError } from "../lib/errors";
 import { prisma } from "../lib/db";
-import { ccClient, CcApiError, CcRateLimitError } from "../services/ccClient";
+import { ccClient, CcApiError, CcRateLimitError, CcTimeoutError } from "../services/ccClient";
 import {
   getProgress,
   getSkuByBarcode,
@@ -167,6 +181,34 @@ describe("seedSkus", () => {
       statusCode: 500,
     });
     expect(cc.listProducts).not.toHaveBeenCalled();
+  });
+
+  // M2a — bucket exhausted during seed must surface as 429, not 500.
+  it("maps a CcRateLimitError from listProducts to a 429 AppError — M2a", async () => {
+    cc.listProducts.mockRejectedValue(new CcRateLimitError());
+
+    const err = await seedSkus().catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(429);
+    // Should not leak internal rate-limit detail.
+    expect(err.message).not.toContain("60 req/min");
+  });
+
+  it("maps a CcTimeoutError from listProducts to a 504 AppError — M2a / S4", async () => {
+    cc.listProducts.mockRejectedValue(new CcTimeoutError());
+
+    const err = await seedSkus().catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(504);
+  });
+
+  it("maps a CcApiError from listProducts to a 502 AppError — M2a", async () => {
+    cc.listProducts.mockRejectedValue(new CcApiError("upstream 503", 503));
+
+    const err = await seedSkus().catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(502);
+    expect(err.message).not.toContain("upstream 503");
   });
 });
 
@@ -304,6 +346,16 @@ describe("getSkuByBarcode", () => {
     expect(err).toBeInstanceOf(AppError);
     expect(err.statusCode).toBe(503);
     expect(err.message).not.toContain("CartonCloud rate limit exceeded");
+  });
+
+  it("maps a CcTimeoutError on CC fallback to a 504 AppError — S4 / module 10", async () => {
+    sku.findUnique.mockResolvedValue(null as never);
+    cc.lookupByBarcode.mockRejectedValue(new CcTimeoutError());
+
+    const err = await getSkuByBarcode("xxx").catch((e) => e as AppError);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.statusCode).toBe(504);
+    expect(err.message).not.toContain("timed out"); // no internal detail
   });
 });
 

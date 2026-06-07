@@ -4,8 +4,8 @@
 # Single origin: Caddy (host) → frontend:80 (nginx). The frontend serves the
 # static PWA and proxies /api/* to the backend over the compose network, so the
 # browser never reaches the backend host directly (the frontend is built with a
-# relative API base — VITE_API_URL=""). The backend is still published on 3005
-# for host-side health checks and migrations.
+# relative API base — VITE_API_URL=""). The backend has NO host port (S5
+# hardening); reach it only via the nginx proxy at :5175/api/health.
 #
 # Bring up:  cp .env.example .env  &&  edit secrets  &&  docker compose up -d --build
 services:

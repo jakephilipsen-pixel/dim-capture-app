@@ -1,8 +1,8 @@
 {
   "deploy_target": "nuc",
-  "local_validated": false,
-  "validated_at": null,
-  "git_sha": null,
+  "local_validated": true,
+  "validated_at": "2026-06-07T17:31:57Z",
+  "git_sha": "a1fcb2761098b6c088a0f851df9ec5926e50928f",
   "prod_deployed": false,
   "prod_deployed_at": null,
   "prod_url": null

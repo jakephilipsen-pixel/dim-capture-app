@@ -31,8 +31,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - "3005:3005"
+    # S5 — backend host port removed. The frontend nginx reaches the backend
+    # over the compose network (backend:3005); it does not need a host port
+    # for the app to function. Host health checks use the nginx proxy:
+    # `http://localhost:5175/api/health`. See .health-endpoints.
     # All app + CC config comes from .env (DATABASE_URL must point at the
     # internal host `postgres:5432`, not localhost — see .env.example).
     env_file:
@@ -60,7 +62,10 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      # M4 — use 127.0.0.1 explicitly; `localhost` in busybox resolves to
+      # ::1 (IPv6) first but nginx only listens on IPv4, causing false
+      # `unhealthy` reports while the container is serving 200.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10

@@ -3,4 +3,6 @@
 # Read by scripts/healthcheck-all.sh. Override the host with NUC_URL to check the
 # NUC instead of localhost:
 #   NUC_URL=http://dims.gocold.local ./scripts/healthcheck-all.sh
-api http://localhost:3005/api/health
+#
+# S5 — the backend no longer publishes a host port; reach it via the nginx proxy.
+api http://localhost:5175/api/health

@@ -11,6 +11,9 @@ import syncRouter from "./routes/sync";
 
 const app = express();
 
+// M3 — remove version disclosure; Express sets this by default.
+app.disable("x-powered-by");
+
 app.use(
   cors({
     origin: process.env.FRONTEND_URL ?? "http://localhost:5175",

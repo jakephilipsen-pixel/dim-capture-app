@@ -57,9 +57,9 @@ export class CcTimeoutError extends CcApiError {
 export interface CcClientOptions {
   // ... existing fields unchanged ...
   syncCapacity?: number;    // default CC_DEFAULT_SYNC_CAPACITY (40)
-  syncRefillPerSec?: number; // default 1
+  syncRefillPerSec?: number; // default CC_DEFAULT_SYNC_REFILL_PER_SEC (40/60 ≈ 0.6667/sec → 40/min)
   seedCapacity?: number;    // default CC_DEFAULT_SEED_CAPACITY (20)
-  seedRefillPerSec?: number; // default 1
+  seedRefillPerSec?: number; // default CC_DEFAULT_SEED_REFILL_PER_SEC (20/60 ≈ 0.3333/sec → 20/min)
   timeoutMs?: number;       // default CC_DEFAULT_TIMEOUT_MS (12_000)
   // deprecated aliases (backwards compat only):
   capacity?: number;        // treated as syncCapacity when syncCapacity absent
@@ -85,16 +85,24 @@ All existing exports (`CcProduct`, `CcDimPayload`, `CcRateLimitError`, `CcApiErr
 CC tenant ceiling: 60 req/min
 
 syncBucket (lookupByBarcode + patchProductDims):
-  capacity = 40, refill = 1/sec → max 40 req/min
+  burst capacity = 40 tokens
+  sustained refill = 40/60 ≈ 0.6667 tokens/sec → 40/min sustained
 
 seedBucket (listProducts):
-  capacity = 20, refill = 1/sec → max 20 req/min
+  burst capacity = 20 tokens
+  sustained refill = 20/60 ≈ 0.3333 tokens/sec → 20/min sustained
 
-Combined ceiling: 40 + 20 = 60 req/min ✓
+Combined burst:     40 + 20 = 60 ≤ CC ceiling ✓
+Combined sustained: (40+20)/60 = 1/sec = 60/min ≤ CC ceiling ✓
 ```
 
 Seed gets 20/min — ample for a ~460-SKU paginated pull at pageSize=100 (5 pages = 5 tokens).
 Sync + lookup gets 40/min — the critical operational path.
+
+> **Bug fix note (2026-06-08):** The original module-10 implementation set both
+> `refillPerSec` defaults to 1/sec, giving a combined sustained rate of 2/sec =
+> 120/min — double CC's ceiling. Fixed: refill defaults are now 40/60 and 20/60
+> respectively so combined sustained = 60/min. Burst capacity is unchanged.
 
 ## Env vars added
 
@@ -104,7 +112,8 @@ Sync + lookup gets 40/min — the critical operational path.
 
 ## Test status
 - [x] Unit tests written: +14 (ccClientResilience.test.ts) + 4 (skuService.test.ts) = 18 new tests
-- [x] All tests passing: `npm test` → **106/106** (was 88/88)
+- [x] **Bug fix 2026-06-08:** +1 sustained-rate test (ccClientResilience.test.ts) — advances clock 60 s and asserts combined permitted calls ≤ 60 (not ~120). This is the regression test that would have caught the original 1/sec-per-bucket default error.
+- [x] All tests passing: `npm test` → **107/107** (was 106/106; +1 sustained-rate test)
 - [x] Typecheck clean: `npx tsc --noEmit` exit 0
 
 ## Quirks / gotchas
@@ -112,7 +121,7 @@ Sync + lookup gets 40/min — the critical operational path.
 - **`AbortSignal.timeout()` is available in Node 18.17+ / Node 20+.** Node 22 (our target) ships it natively. No polyfill needed.
 - **DOMException name varies by platform.** `AbortSignal.timeout()` rejects with `name: "TimeoutError"` in Node 22; some older browsers/environments use `"AbortError"`. The `handleFetchError` method catches both.
 - **`capacity` / `refillPerSec` still work** (backwards compat) and are mapped to `syncCapacity` / `syncRefillPerSec`. Tests that set `capacity: N` see that as the sync budget; the seed budget is always separate at its default. This preserves all 88 pre-module-10 tests without modification.
-- **The combined default budget (40+20=60) is exactly CC's ceiling.** If CC's real limit turns out to be lower (e.g. their docs are wrong) both values can be tuned via `fromEnv` overrides or `CC_TIMEOUT_MS`-style env vars. Separate env vars for bucket sizes are not yet added (only `timeoutMs` is env-driven) since the split is an internal concern. Add them when operationally needed.
+- **The combined default burst (40+20=60) AND combined sustained (60/min) are both exactly CC's ceiling.** Burst: both buckets fill on cold start; combined burst = 60 ≤ ceiling. Sustained: sync refills at 40/60/sec, seed at 20/60/sec; combined = 1/sec = 60/min ≤ ceiling. If CC's real limit turns out to be lower, both values can be tuned via `fromEnv` overrides. Separate env vars for bucket sizes are not yet added (only `timeoutMs` is env-driven) since the split is an internal concern.
 - **S4 quirk note from stress test:** The stress agent observed the event loop was NOT starved by the hung fetch (it was held by a Node internal thread). Only the 90 s HTTP client timeout saved it. `AbortSignal.timeout` cuts this to 12 s without relying on the client.
 
 ## In-flight work

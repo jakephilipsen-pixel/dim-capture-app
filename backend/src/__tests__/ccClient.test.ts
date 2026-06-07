@@ -17,6 +17,7 @@ function makeClient(opts?: {
   responder?: (url: string, init: RequestInit) => Response | Promise<Response>;
   clock?: () => number;
   capacity?: number;
+  refillPerSec?: number;
 }) {
   const fetchMock = vi.fn(
     opts?.responder ?? (() => new Response("[]", { status: 200 })),
@@ -28,6 +29,7 @@ function makeClient(opts?: {
     fetchImpl: fetchMock as unknown as typeof fetch,
     now: opts?.clock,
     capacity: opts?.capacity,
+    refillPerSec: opts?.refillPerSec,
   });
   return { client, fetchMock };
 }
@@ -183,10 +185,14 @@ describe("CcClient.patchProductDims", () => {
 describe("CcClient rate limiting", () => {
   it("rejects the 61st request within a minute with CcRateLimitError", async () => {
     let t = 1_000_000;
+    // Explicit refillPerSec=1 (deprecated alias → syncRefillPerSec) to keep this
+    // test's 1000 ms advance == 1 token assertion independent of the production
+    // default rate (40/60 ≈ 0.6667/sec). Tests refill *logic*, not the default.
     const { client, fetchMock } = makeClient({
       responder: () => json([]),
       clock: () => t, // frozen — no refill between calls
       capacity: 60,
+      refillPerSec: 1,
     });
 
     // 60 requests drain the full bucket.
@@ -207,16 +213,19 @@ describe("CcClient rate limiting", () => {
     expect(fetchMock).toHaveBeenCalledTimes(61);
   });
 
-  it("refills at 1 token/sec, capped at capacity", async () => {
+  it("refills at configured rate, capped at capacity", async () => {
     let t = 0;
+    // Explicit refillPerSec=1 so the 5 × 1000 ms advance == 5 tokens assertion
+    // is independent of the production default rate (40/60 ≈ 0.6667/sec).
     const { client, fetchMock } = makeClient({
       responder: () => json([]),
       clock: () => t,
       capacity: 60,
+      refillPerSec: 1,
     });
     // Drain.
     for (let i = 0; i < 60; i++) await client.lookupByBarcode(`b${i}`, WAREHOUSE);
-    // Advance 5s → 5 tokens back.
+    // Advance 5s at 1/sec → 5 tokens back.
     t += 5000;
     for (let i = 0; i < 5; i++) await client.lookupByBarcode(`r${i}`, WAREHOUSE);
     expect(fetchMock).toHaveBeenCalledTimes(65);

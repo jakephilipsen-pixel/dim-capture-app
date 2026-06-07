@@ -69,12 +69,16 @@ until refill.
 **Fix:** `CcClient` now maintains **two separate token buckets**:
 
 - `syncBucket`: guards `lookupByBarcode` and `patchProductDims` (sync + lookup
-  path). Default capacity: 40 tokens, refill 1/sec.
-- `seedBucket`: guards `listProducts` (admin seed path). Default capacity: 20
-  tokens, refill 1/sec.
+  path). Burst capacity: 40 tokens; sustained refill: 40/60 ≈ 0.6667/sec → 40/min.
+- `seedBucket`: guards `listProducts` (admin seed path). Burst capacity: 20 tokens;
+  sustained refill: 20/60 ≈ 0.3333/sec → 20/min.
 
-**Combined cap: 40 + 20 = 60 tokens/min → does not exceed CC's 60 req/min
-tenant ceiling.**
+**Combined burst: 40 + 20 = 60 ≤ CC's 60/min ceiling.**
+**Combined sustained: (40+20)/60 = 1/sec = 60/min ≤ CC's 60/min ceiling.**
+
+> Bug fix note: the original implementation defaulted both buckets to 1/sec
+> refill, giving combined sustained = 2/sec = 120/min — double CC's ceiling.
+> The defaults were corrected to 40/60 and 20/60 respectively.
 
 The split is deliberate: seed is an infrequent admin operation; sync + lookup
 are the critical operational path and get the larger share.

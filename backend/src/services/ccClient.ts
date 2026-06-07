@@ -12,9 +12,10 @@
  *   Two separate token buckets guard outbound calls:
  *   - syncBucket: guards lookupByBarcode + patchProductDims (user lookups + syncs).
  *   - seedBucket: guards listProducts (admin seed pulls).
- *   Default budgets: sync=40 tokens/min, seed=20 tokens/min → combined ≤ 60/min,
- *   which respects CartonCloud's 60 req/min tenant ceiling. Both buckets reject
- *   (do not queue) with `CcRateLimitError` when empty.
+ *   Burst capacity: sync=40, seed=20 → combined burst = 60, within CC's 60 req/min ceiling.
+ *   Sustained refill: sync=40/60 ≈ 0.6667/sec, seed=20/60 ≈ 0.3333/sec → combined sustained
+ *   = 1 token/sec = 60/min, exactly at CC's ceiling. Both buckets reject (do not queue) with
+ *   `CcRateLimitError` when empty.
  *
  * Fetch timeouts (module 10 cc-resilience):
  *   Every fetch call receives an `AbortSignal.timeout(timeoutMs)`. A timed-out
@@ -47,9 +48,17 @@ export const CC_DEFAULT_TIMEOUT_MS = 12_000;
  * seed + sync MUST NOT exceed CC's 60 req/min tenant ceiling.
  * seed=20: admin seed pulls are infrequent; 20/min is ample for a ~400-SKU paginated pull.
  * sync=40: the critical sync+lookup path gets the larger share.
+ *
+ * Burst capacities: sync=40, seed=20 → combined burst = 60 (CC ceiling).
+ * Sustained refill rates: sync=40/60/sec, seed=20/60/sec → combined sustained
+ * = (40+20)/60 = 1 token/sec = 60/min (exactly CC's ceiling, never exceeds it).
  */
 export const CC_DEFAULT_SYNC_CAPACITY = 40;
 export const CC_DEFAULT_SEED_CAPACITY = 20;
+/** Sustained refill rate for syncBucket: 40 tokens/min = 40/60 tokens/sec ≈ 0.6667/sec. */
+export const CC_DEFAULT_SYNC_REFILL_PER_SEC = 40 / 60;
+/** Sustained refill rate for seedBucket: 20 tokens/min = 20/60 tokens/sec ≈ 0.3333/sec. */
+export const CC_DEFAULT_SEED_REFILL_PER_SEC = 20 / 60;
 
 /** A CartonCloud product as this app cares about it. Dims/weight are nullable
  *  because a product may have no dimensions captured in CC yet. */
@@ -126,14 +135,22 @@ export interface CcClientOptions {
    * Default 40. Combined with seedCapacity MUST NOT exceed 60 (CC tenant limit).
    */
   syncCapacity?: number;
-  /** Sync-path tokens refilled per second. Default 1 (→ 40/min at default capacity). */
+  /**
+   * Sync-path tokens refilled per second.
+   * Default CC_DEFAULT_SYNC_REFILL_PER_SEC (40/60 ≈ 0.6667/sec → 40/min sustained).
+   * Combined with seedRefillPerSec, default sustained rate = 60/min ≤ CC ceiling.
+   */
   syncRefillPerSec?: number;
   /**
    * Seed-path token-bucket capacity (listProducts).
    * Default 20. Combined with syncCapacity MUST NOT exceed 60 (CC tenant limit).
    */
   seedCapacity?: number;
-  /** Seed-path tokens refilled per second. Default 1 (→ 20/min at default capacity). */
+  /**
+   * Seed-path tokens refilled per second.
+   * Default CC_DEFAULT_SEED_REFILL_PER_SEC (20/60 ≈ 0.3333/sec → 20/min sustained).
+   * Combined with syncRefillPerSec, default sustained rate = 60/min ≤ CC ceiling.
+   */
   seedRefillPerSec?: number;
   /**
    * @deprecated Use syncCapacity instead. Kept for backwards compatibility with
@@ -249,9 +266,13 @@ export class CcClient {
     // This keeps all pre-module-10 tests passing without modification.
     const syncCap =
       opts.syncCapacity ?? (opts.capacity !== undefined ? opts.capacity : CC_DEFAULT_SYNC_CAPACITY);
-    const syncRefill = opts.syncRefillPerSec ?? opts.refillPerSec ?? 1;
+    // Default: 40/60/sec so sustained sync throughput = 40/min.
+    // Backwards-compat: deprecated `refillPerSec` still maps to the sync bucket.
+    const syncRefill = opts.syncRefillPerSec ?? opts.refillPerSec ?? CC_DEFAULT_SYNC_REFILL_PER_SEC;
     const seedCap = opts.seedCapacity ?? CC_DEFAULT_SEED_CAPACITY;
-    const seedRefill = opts.seedRefillPerSec ?? 1;
+    // Default: 20/60/sec so sustained seed throughput = 20/min.
+    // Combined sustained = (40+20)/60 = 1/sec = 60/min ≤ CC tenant ceiling.
+    const seedRefill = opts.seedRefillPerSec ?? CC_DEFAULT_SEED_REFILL_PER_SEC;
 
     this.syncBucket = new TokenBucket(syncCap, syncRefill, clockFn);
     this.seedBucket = new TokenBucket(seedCap, seedRefill, clockFn);

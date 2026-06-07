@@ -14,8 +14,46 @@
  * as CC expects them (cc-client passes them through with no conversion).
  */
 import { z } from "zod";
-import { prisma } from "../lib/db";
+import { prisma, withAdvisoryLock } from "../lib/db";
 import { AppError } from "../lib/errors";
+
+/**
+ * Fixed namespace prefix for per-SKU advisory lock keys (S8 fix).
+ *
+ * We derive a per-SKU advisory lock key by hashing the skuId string into a
+ * 63-bit value (Postgres advisory lock keys are signed `bigint`).  The namespace
+ * prefix mixes into the hash so dim-capture keys never collide with other lock
+ * key spaces (e.g. the sync C1 key in syncService.ts).
+ *
+ * The hash is FNV-1a 64-bit reduced to 63 bits (clear the MSB so the value is
+ * always positive and fits Postgres's signed `bigint`).  Collision probability
+ * is negligible for a small, stable set of CC product UUIDs.
+ */
+const DIM_CAPTURE_LOCK_NAMESPACE = "dim-capture:capture:";
+
+/**
+ * Derive a deterministic Postgres advisory lock key for a given SKU id.
+ *
+ * Uses FNV-1a 64-bit (offset basis + prime per spec) reduced to a positive
+ * signed 63-bit bigint so it fits Postgres's `bigint` type.
+ */
+function skuLockKey(skuId: string): bigint {
+  // FNV-1a 64-bit constants.
+  const FNV_PRIME = 1099511628211n;
+  const FNV_OFFSET = 14695981039346656037n;
+  // Mask to keep values in the unsigned 64-bit range during accumulation.
+  const MASK64 = (1n << 64n) - 1n;
+  // Final mask to produce a positive signed 63-bit value.
+  const MASK63 = (1n << 63n) - 1n;
+
+  const input = DIM_CAPTURE_LOCK_NAMESPACE + skuId;
+  let hash = FNV_OFFSET;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash ^ BigInt(input.charCodeAt(i))) & MASK64;
+    hash = (hash * FNV_PRIME) & MASK64;
+  }
+  return hash & MASK63;
+}
 
 /** A captured dim joined to its SKU's identity — the shape `GET /api/dims` returns. */
 export interface DimWithSku {
@@ -120,14 +158,19 @@ function validate<T>(schema: z.ZodType<T>, raw: unknown): T {
  * Save a capture. Validates the body, confirms the SKU exists (404 if not),
  * then upserts the SKU's single dim row. An overwrite (re-capture) resets
  * `syncedToCC`/`syncedAt` and re-stamps `measuredAt` so the new dims re-sync.
+ *
+ * Concurrency (S8 fix): the SKU-lookup + dim-upsert sequence runs inside an
+ * advisory-locked interactive transaction keyed by the SKU id (`skuLockKey`).
+ * Concurrent first-captures of the same dim-less SKU serialise: the loser gets
+ * `null` back immediately (without touching the DB) and the caller must treat
+ * that as a no-op.  For the update (existing-row) path the DB-level
+ * `ON CONFLICT DO UPDATE` is already atomic, so the lock is belt-and-braces but
+ * costs nothing in the single-user production scenario.
+ *
+ * Returns `null` when another in-flight capture of the same SKU holds the lock.
  */
 export async function saveDim(raw: unknown) {
   const input = validate(captureSchema, raw);
-
-  const sku = await prisma.sku.findUnique({ where: { id: input.skuId } });
-  if (!sku) {
-    throw new AppError(`Unknown skuId: ${input.skuId}`, 404);
-  }
 
   const measurements = {
     lengthMm: input.lengthMm,
@@ -138,12 +181,23 @@ export async function saveDim(raw: unknown) {
     notes: input.notes ?? null,
   };
 
-  return prisma.dim.upsert({
-    where: { skuId: input.skuId },
-    create: { skuId: input.skuId, ...measurements },
-    // Re-capture: overwrite measurements and force a re-sync.
-    update: { ...measurements, measuredAt: new Date(), syncedToCC: false, syncedAt: null },
-  });
+  return withAdvisoryLock(
+    prisma,
+    skuLockKey(input.skuId),
+    async (tx) => {
+      const sku = await tx.sku.findUnique({ where: { id: input.skuId } });
+      if (!sku) {
+        throw new AppError(`Unknown skuId: ${input.skuId}`, 404);
+      }
+
+      return tx.dim.upsert({
+        where: { skuId: input.skuId },
+        create: { skuId: input.skuId, ...measurements },
+        // Re-capture: overwrite measurements and force a re-sync.
+        update: { ...measurements, measuredAt: new Date(), syncedToCC: false, syncedAt: null },
+      });
+    },
+  );
 }
 
 /** All captured dims, most-recent first, joined to their SKU name + barcode. */

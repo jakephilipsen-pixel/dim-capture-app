@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the two singletons skuService depends on. Factories are hoisted by
 // vitest, so the service (imported below) binds to these mocks.
+//
+// M1 fix: `getProgress` now calls `prisma.$transaction([...])` (batch form).
+// We add `$transaction` to the prisma mock — it executes all promises in the
+// received array via `Promise.all`, so the existing `sku.count` / `dim.count`
+// mocked return values feed through unchanged.
 vi.mock("../lib/db", () => ({
   prisma: {
     sku: {
@@ -11,6 +16,11 @@ vi.mock("../lib/db", () => ({
       count: vi.fn(),
     },
     dim: { count: vi.fn() },
+    $transaction: vi.fn(async (arg: unknown) => {
+      if (Array.isArray(arg)) return Promise.all(arg as Promise<unknown>[]);
+      // Should never be called in interactive form from skuService.
+      throw new Error("unexpected interactive $transaction in skuService");
+    }),
   },
 }));
 
@@ -85,6 +95,14 @@ beforeEach(() => {
   process.env.CC_WAREHOUSE_ID = WAREHOUSE;
   // Default: upsert resolves to an empty object (seed ignores the result).
   sku.upsert.mockResolvedValue({} as never);
+  // Re-establish the $transaction implementation wiped by resetAllMocks.
+  // M1: getProgress uses the array form — execute all promises via Promise.all.
+  (
+    prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }
+  ).$transaction.mockImplementation(async (arg: unknown) => {
+    if (Array.isArray(arg)) return Promise.all(arg as Promise<unknown>[]);
+    throw new Error("unexpected interactive $transaction in skuService");
+  });
 });
 
 afterEach(() => {

@@ -14,7 +14,7 @@
  * Units: stored mm / kg are passed to CC verbatim — cc-client does no
  * conversion, and CC expects mm for L/W/H and kg for weight.
  */
-import { prisma } from "../lib/db";
+import { prisma, withAdvisoryLock } from "../lib/db";
 import { logger } from "../middleware/logger";
 import { ccClient } from "./ccClient";
 
@@ -82,23 +82,18 @@ function chunk<T>(items: T[], size: number): T[][] {
  * client `tx` so they share the locked connection; `ccClient` stays external HTTP.
  */
 export async function syncUnsyncedDims(): Promise<SyncReport> {
-  return prisma.$transaction(
+  // C1 fix: serialise concurrent sync runs via a transaction-scoped advisory
+  // lock (see DECISIONS.md 2026-06-04).  `withAdvisoryLock` is the shared helper
+  // in `lib/db.ts` — the exact same semantics as the original inline logic, now
+  // reusable.  A loser returns `null`; we map that to the "already running" report.
+  //
+  // The interactive-tx default timeout (5 s) is too short for batched CC HTTP
+  // calls held inside the transaction; widen it. `maxWait` caps how long we wait
+  // for a pooled connection before starting.
+  const result = await withAdvisoryLock(
+    prisma,
+    SYNC_LOCK_KEY,
     async (tx) => {
-      const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`
-        SELECT pg_try_advisory_xact_lock(${SYNC_LOCK_KEY}::bigint) AS locked
-      `;
-
-      if (!locked) {
-        // Another sync run already holds the lock. Don't double-PATCH — report
-        // the live pending count and let the in-flight winner do the work.
-        const pending = await tx.dim.count({ where: { syncedToCC: false } });
-        log.info(
-          { pending },
-          "CC dim sync already running — skipping this run (advisory lock held)",
-        );
-        return { synced: 0, failed: 0, pending };
-      }
-
       const unsynced = await tx.dim.findMany({
         where: { syncedToCC: false },
         orderBy: { measuredAt: "asc" },
@@ -145,9 +140,19 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
       log.info({ synced, failed, pending }, "CC dim sync complete");
       return { synced, failed, pending };
     },
-    // The interactive-tx default timeout (5 s) is too short for batched CC HTTP
-    // calls held inside the transaction; widen it. `maxWait` caps how long we
-    // wait for a pooled connection before starting.
     { timeout: 120_000, maxWait: 10_000 },
   );
+
+  if (result === null) {
+    // Another sync run already holds the lock. Don't double-PATCH — report
+    // the live pending count and let the in-flight winner do the work.
+    const pending = await prisma.dim.count({ where: { syncedToCC: false } });
+    log.info(
+      { pending },
+      "CC dim sync already running — skipping this run (advisory lock held)",
+    );
+    return { synced: 0, failed: 0, pending };
+  }
+
+  return result;
 }

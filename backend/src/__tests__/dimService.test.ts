@@ -1,25 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Mock the prisma singleton dimService depends on. Factory is hoisted by
-// vitest, so the service (imported below) binds to this mock.
-vi.mock("../lib/db", () => ({
-  prisma: {
-    sku: { findUnique: vi.fn() },
-    dim: {
-      upsert: vi.fn(),
-      findMany: vi.fn(),
-      findUnique: vi.fn(),
-      update: vi.fn(),
-    },
-  },
-}));
+// Mock `lib/db` — dimService imports both `prisma` and `withAdvisoryLock`.
+//
+// `saveDim` now runs inside `withAdvisoryLock(prisma, key, cb)`.  We mock
+// `withAdvisoryLock` to call the callback with a `tx` stub that is the same
+// object as `prisma` (all the same vi.fn()s), so assertions on `sku.findUnique`
+// and `dim.upsert` continue to work exactly as before.  Lock contention can be
+// simulated per-test by swapping the implementation to `mockResolvedValue(null)`.
+vi.mock("../lib/db", () => {
+  const sku = { findUnique: vi.fn() };
+  const dim = {
+    upsert: vi.fn(),
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+    update: vi.fn(),
+  };
+  const prisma = { sku, dim };
+  // Default: lock acquired — run the callback with the shared prisma surface.
+  const withAdvisoryLock = vi.fn(
+    async (_p: unknown, _k: unknown, cb: (tx: unknown) => unknown) => cb(prisma),
+  );
+  return { prisma, withAdvisoryLock };
+});
 
 import { AppError } from "../lib/errors";
-import { prisma } from "../lib/db";
+import { prisma, withAdvisoryLock } from "../lib/db";
 import { listDims, saveDim, updateDim } from "../services/dimService";
 
 const sku = vi.mocked(prisma.sku, true);
 const dim = vi.mocked(prisma.dim, true);
+const lock = vi.mocked(withAdvisoryLock, true);
 
 const validCapture = {
   skuId: "prod-1",
@@ -43,6 +53,11 @@ async function catchAppError(fn: () => Promise<unknown>): Promise<AppError> {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // Re-establish `withAdvisoryLock` after resetAllMocks wipes its implementation.
+  // Default: lock acquired — invoke the callback with the shared prisma/tx stub.
+  lock.mockImplementation(
+    async (_p, _k, cb: (tx: unknown) => unknown) => cb({ sku, dim }),
+  );
 });
 
 describe("saveDim", () => {

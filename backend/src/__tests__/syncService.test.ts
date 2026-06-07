@@ -2,43 +2,54 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the two singletons syncService depends on.
 //
-// syncUnsyncedDims now runs inside `prisma.$transaction(cb, opts)` guarded by a
-// transaction-scoped advisory lock (C1 fix). The mock `$transaction` invokes the
-// callback with a `tx` stub that mirrors the global `prisma.dim.*` mocks (so the
-// existing tests keep asserting against `dim.findMany/update/count`) and adds a
-// `$queryRaw` that returns the advisory-lock result. By default the lock is held
-// (`[{ locked: true }]`); the "already running" test overrides it to false.
+// syncUnsyncedDims now calls `withAdvisoryLock(prisma, key, cb, opts)` from
+// `lib/db`.  We mock the entire `../lib/db` module so:
+//   - `prisma.dim.*` are the vi.fn() stubs the test assertions use.
+//   - `withAdvisoryLock` is a mock that (a) when the lock is "acquired" calls
+//     the callback with a `tx` stub identical to the old `$transaction` tx shape,
+//     and (b) when the lock is "contended" returns `null` directly — exactly what
+//     the real helper does.
+//
+// The "lock acquired/contended" state is toggled by `lockAcquired()` /
+// `lockContended()` helpers (same API as before; underlying impl changed).
+//
+// Note: `prisma.dim.count` is also called by the `null`-result path in
+// `syncUnsyncedDims` (the "already running" branch reads the live pending count
+// from the global `prisma` client, not the tx).  The mock wires that up too.
 vi.mock("../lib/db", () => {
   const dim = { findMany: vi.fn(), update: vi.fn(), count: vi.fn() };
-  const $queryRaw = vi.fn();
-  const $transaction = vi.fn(
-    async (cb: (tx: unknown) => unknown) => cb({ dim, $queryRaw }),
+  const $queryRaw = vi.fn(); // kept so tests can inspect the lock probe if needed
+  // `withAdvisoryLock` mock: by default runs the callback (lock acquired).
+  // Tests that want contention swap this implementation via `lockContended()`.
+  const withAdvisoryLock = vi.fn(
+    async (_prisma: unknown, _key: unknown, cb: (tx: unknown) => unknown) =>
+      cb({ dim, $queryRaw }),
   );
-  return { prisma: { dim, $queryRaw, $transaction } };
+  const prisma = { dim, $queryRaw };
+  return { prisma, withAdvisoryLock };
 });
 vi.mock("../services/ccClient", () => ({
   ccClient: { patchProductDims: vi.fn() },
 }));
 
-import { prisma } from "../lib/db";
+import { prisma, withAdvisoryLock } from "../lib/db";
 import { ccClient } from "../services/ccClient";
 import { syncUnsyncedDims } from "../services/syncService";
 
 const dim = vi.mocked(prisma.dim, true);
 const cc = vi.mocked(ccClient, true);
-// `$queryRaw` is the advisory-lock probe inside the transaction.
-const queryRaw = vi.mocked(
-  (prisma as unknown as { $queryRaw: ReturnType<typeof vi.fn> }).$queryRaw,
-  true,
-);
+const lock = vi.mocked(withAdvisoryLock, true);
 
 /** Make the advisory lock report acquired (the run proceeds). */
-function lockAcquired() {
-  queryRaw.mockResolvedValue([{ locked: true }] as never);
+function lockAcquired(): void {
+  lock.mockImplementation(
+    async (_prisma, _key, cb: (tx: unknown) => unknown) => cb({ dim, $queryRaw: vi.fn() }),
+  );
 }
+
 /** Make the advisory lock report contended (another run holds it). */
-function lockContended() {
-  queryRaw.mockResolvedValue([{ locked: false }] as never);
+function lockContended(): void {
+  lock.mockResolvedValue(null as never);
 }
 
 /** A pending (unsynced) dim row, one per index. */
@@ -56,14 +67,6 @@ function pendingDim(i: number) {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  // `resetAllMocks` wipes the `$transaction` implementation set in the factory,
-  // so re-establish it: invoke the callback with the same tx stub shape.
-  (
-    prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }
-  ).$transaction.mockImplementation(
-    async (cb: (tx: unknown) => unknown) =>
-      cb({ dim, $queryRaw: queryRaw }),
-  );
   // Default: this run wins the lock. The "already running" test overrides it.
   lockAcquired();
 });

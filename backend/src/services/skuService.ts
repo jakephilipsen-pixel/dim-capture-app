@@ -249,9 +249,16 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
   };
 }
 
-/** Capture-progress summary from live DB counts. */
+/**
+ * Capture-progress summary from live DB counts.
+ *
+ * M1 fix: the three counts are issued inside a single `prisma.$transaction([...])`
+ * (batch / read-only form) so they share one consistent DB snapshot.  Without this,
+ * a concurrent write between any two of the three `count()` calls can produce an
+ * incoherent result (e.g. `captured > total`, or `syncedToCC > captured`).
+ */
 export async function getProgress(): Promise<ProgressResponse> {
-  const [total, captured, syncedToCC] = await Promise.all([
+  const [total, captured, syncedToCC] = await prisma.$transaction([
     prisma.sku.count(),
     prisma.dim.count(),
     prisma.dim.count({ where: { syncedToCC: true } }),

@@ -54,6 +54,8 @@ services:
       CC_WAREHOUSE_ID: wh-forage
       CC_BASE_URL: http://mock-cc:9099
       FRONTEND_URL: http://localhost:5179
+      # cc-write gate (module 12): seed + sync require X-Sync-Key == SYNC_SECRET.
+      SYNC_SECRET: smoke-secret
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,7 +81,7 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 3s
       timeout: 5s
       retries: 10

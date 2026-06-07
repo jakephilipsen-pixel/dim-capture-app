@@ -76,7 +76,12 @@ export async function withAdvisoryLock<T>(
         // pg_advisory_xact_lock returns void — it ALWAYS acquires the lock,
         // blocking until the current holder's transaction commits/rolls back.
         // No "did we get it?" check needed.
-        await tx.$queryRaw`
+        //
+        // Use $executeRaw, NOT $queryRaw: the function returns SQL `void`, which
+        // Prisma's $queryRaw cannot deserialise (throws P2010 "Failed to
+        // deserialize column of type 'void'"). $executeRaw runs the statement
+        // and returns an affected-row count we ignore — no column deserialise.
+        await tx.$executeRaw`
           SELECT pg_advisory_xact_lock(${lockKey}::bigint)
         `;
         return fn(tx);

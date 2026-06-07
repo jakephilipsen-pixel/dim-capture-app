@@ -159,17 +159,21 @@ function validate<T>(schema: z.ZodType<T>, raw: unknown): T {
  * then upserts the SKU's single dim row. An overwrite (re-capture) resets
  * `syncedToCC`/`syncedAt` and re-stamps `measuredAt` so the new dims re-sync.
  *
- * Concurrency (S8 fix): the SKU-lookup + dim-upsert sequence runs inside an
- * advisory-locked interactive transaction keyed by the SKU id (`skuLockKey`).
- * Concurrent first-captures of the same dim-less SKU serialise: the loser gets
- * `null` back immediately (without touching the DB) and the caller must treat
- * that as a no-op.  For the update (existing-row) path the DB-level
- * `ON CONFLICT DO UPDATE` is already atomic, so the lock is belt-and-braces but
- * costs nothing in the single-user production scenario.
+ * Concurrency (S8 fix — blocking advisory lock): the SKU-lookup + dim-upsert
+ * sequence runs inside an advisory-locked interactive transaction keyed by the
+ * SKU id (`skuLockKey`).  The lock is BLOCKING (`pg_advisory_xact_lock`) so
+ * concurrent first-captures of the same SKU serialise rather than the loser
+ * silently dropping its capture.  The loser waits for the winner's transaction
+ * to commit, then proceeds with its own upsert (which hits the DO UPDATE path)
+ * and returns a real row.  This prevents the previous 200-null data-loss path
+ * (`pg_try_advisory_xact_lock` returning null → route sending HTTP 200 with
+ * body `null` → frontend showing "Saved!" and removing the queue entry).
  *
- * Returns `null` when another in-flight capture of the same SKU holds the lock.
+ * Always returns the saved Dim on success.  Can only throw, never return null:
+ *   - 422 if validation fails (thrown before the lock is acquired).
+ *   - 404 if the SKU doesn't exist (thrown from inside the callback).
  */
-export async function saveDim(raw: unknown) {
+export async function saveDim(raw: unknown): Promise<import("@prisma/client").Dim> {
   const input = validate(captureSchema, raw);
 
   const measurements = {
@@ -181,7 +185,11 @@ export async function saveDim(raw: unknown) {
     notes: input.notes ?? null,
   };
 
-  return withAdvisoryLock(
+  // blocking: true — use pg_advisory_xact_lock (BLOCKING variant).
+  // The helper's return type is Promise<T | null>, but with blocking: true it
+  // will never return null (contention makes callers wait, not bail).  Cast to
+  // strip the null from the inferred type so callers have the correct contract.
+  const result = await withAdvisoryLock(
     prisma,
     skuLockKey(input.skuId),
     async (tx) => {
@@ -197,7 +205,13 @@ export async function saveDim(raw: unknown) {
         update: { ...measurements, measuredAt: new Date(), syncedToCC: false, syncedAt: null },
       });
     },
+    { blocking: true },
   );
+
+  // TypeScript sees Promise<Dim | null> from withAdvisoryLock's signature, but
+  // blocking mode NEVER returns null — the non-null assertion is safe by design.
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  return result!;
 }
 
 /** All captured dims, most-recent first, joined to their SKU name + barcode. */

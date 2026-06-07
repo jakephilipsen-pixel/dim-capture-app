@@ -64,3 +64,4 @@ Format: `YYYY-MM-DD | Decision | Rationale | Made during`
 
 ## How to add a decision
 When working on a module and a non-trivial choice comes up (library, pattern, schema shape, naming convention that will repeat), append a row here before continuing. This prevents re-litigating the same question in every future module conversation.
+| 2026-06-08 | CSP `style-src` relaxed from `'self'` to `'self' 'unsafe-inline'` (frontend/nginx.conf, all 5 add_header copies). | Radix UI (the project's component lib — Dialog in module 14, Sheet in modules 06/07) sets inline `style` ATTRIBUTES for positioning/scroll-lock that `style-src 'self'` blocks (CSP violation logged in-browser, surfaced testing the module-14 Sync Now dialog). `'unsafe-inline'` for styles is CSS-only (no script execution risk); `script-src` stays strict `'self'`. The alternative (hashes/nonces) cannot cover Radix's dynamic inline style attributes. | module 14 browser test — refines module 11 (S7) |

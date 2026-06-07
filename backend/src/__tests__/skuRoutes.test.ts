@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the service layer so the routes are exercised in isolation — this proves
 // the routing, validation, and AppError→HTTP mapping (via backend-core's
@@ -73,19 +73,33 @@ describe("GET /api/skus/:barcode", () => {
 });
 
 describe("POST /api/admin/seed", () => {
-  it("200s with the seed report", async () => {
+  // The route is gated by requireSyncKey (module 12 / S6). These tests
+  // exercise handler/service behaviour, so they supply the key.
+  const TEST_SECRET = "test-seed-secret";
+  beforeEach(() => {
+    process.env.SYNC_SECRET = TEST_SECRET;
+  });
+  afterEach(() => {
+    delete process.env.SYNC_SECRET;
+  });
+
+  it("200s with the seed report (auth gate satisfied)", async () => {
     seedSkus.mockResolvedValue({ pages: 2, fetched: 130, upserted: 130, ccDimsPresent: 100 });
 
-    const res = await request(app).post("/api/admin/seed");
+    const res = await request(app)
+      .post("/api/admin/seed")
+      .set("X-Sync-Key", TEST_SECRET);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ pages: 2, fetched: 130, upserted: 130, ccDimsPresent: 100 });
   });
 
-  it("500s when the service throws a config AppError", async () => {
+  it("500s when the service throws a config AppError (auth gate satisfied)", async () => {
     seedSkus.mockRejectedValue(new AppError("CC_WAREHOUSE_ID is not configured", 500));
 
-    const res = await request(app).post("/api/admin/seed");
+    const res = await request(app)
+      .post("/api/admin/seed")
+      .set("X-Sync-Key", TEST_SECRET);
 
     expect(res.status).toBe(500);
   });

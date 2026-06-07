@@ -82,10 +82,16 @@ describe("PUT /api/dims/:id", () => {
 });
 
 describe("POST /api/sync/cc", () => {
-  it("returns the sync report", async () => {
+  it("returns the sync report (auth gate satisfied)", async () => {
+    // The route is gated by requireSyncKey (module 12 / S6). Supply the key so
+    // this test exercises the handler/service path, not the auth middleware.
+    process.env.SYNC_SECRET = "test-sync-secret";
     mockSync.mockResolvedValue({ synced: 2, failed: 1, pending: 1 });
-    const res = await request(app).post("/api/sync/cc");
+    const res = await request(app)
+      .post("/api/sync/cc")
+      .set("X-Sync-Key", "test-sync-secret");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ synced: 2, failed: 1, pending: 1 });
+    delete process.env.SYNC_SECRET;
   });
 });

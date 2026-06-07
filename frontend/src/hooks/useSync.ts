@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '@/lib/api'
 import { useOfflineQueue } from '@/context/OfflineQueueContext'
 import { useProgressContext } from '@/context/ProgressContext'
+import { getSyncKey } from '@/lib/syncKey'
 
 export interface UseSyncResult {
   online: boolean
@@ -50,11 +51,19 @@ export function useSync(pollMs = 30_000): UseSyncResult {
       }
 
       // 2. Push backend-side unsynced dims to CartonCloud.
-      try {
-        const progress = await api.getProgress()
-        if (progress.pendingSync > 0) await api.syncToCC()
-      } catch {
-        // Progress/sync unreachable — next tick will retry.
+      // Only attempt CC-sync when a sync key is present. Without a key,
+      // api.syncToCC() would throw a 401 immediately — skip silently so the
+      // "N pending" badge simply stays until the operator authorises via
+      // Sync Now. A bad key (real 401) is cleared by api.syncToCC() itself;
+      // after that getSyncKey() returns null, so the next auto-tick also
+      // skips — no 401 spam.
+      if (getSyncKey() !== null) {
+        try {
+          const progress = await api.getProgress()
+          if (progress.pendingSync > 0) await api.syncToCC()
+        } catch {
+          // Progress/sync unreachable or 401 (key already cleared) — next tick.
+        }
       }
     } finally {
       await refreshQueue()

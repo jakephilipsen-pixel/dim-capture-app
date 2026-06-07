@@ -5,7 +5,15 @@
  * 04 (dim-api) STATE.md. Base URL comes from `VITE_API_URL`
  * (default `http://localhost:3005`). Every wrapper throws `ApiError` on a
  * non-2xx response so callers can branch on `err.status` (e.g. 404 lookups).
+ *
+ * CC-write gate (module 12): POST /api/sync/cc requires `X-Sync-Key` header.
+ * The key is held in sessionStorage via `lib/syncKey.ts` (module 14). The
+ * `syncToCC` wrapper reads the key from the store, attaches it, and handles
+ * the 401 path by clearing the key so callers can prompt for re-entry.
+ * POST /api/dims (capture) is ungated and never receives the key.
  */
+
+import { clearSyncKey, getSyncKey } from '@/lib/syncKey'
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:3005').replace(/\/+$/, '')
 
@@ -189,8 +197,26 @@ export const api = {
     })
   },
 
-  syncToCC(): Promise<SyncReport> {
-    return request<SyncReport>('/api/sync/cc', { method: 'POST' })
+  async syncToCC(): Promise<SyncReport> {
+    const key = getSyncKey()
+    if (!key) {
+      // No key present — signal the caller to prompt the operator.
+      // Throw a 401 ApiError without making a network request (avoids 401 spam
+      // to the backend and keeps error handling uniform for callers).
+      throw new ApiError(401, 'Sync key required', null)
+    }
+    try {
+      return await request<SyncReport>('/api/sync/cc', {
+        method: 'POST',
+        headers: { 'X-Sync-Key': key },
+      })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        // Wrong key — clear it so the operator is prompted on the next attempt.
+        clearSyncKey()
+      }
+      throw err
+    }
   },
 } as const
 

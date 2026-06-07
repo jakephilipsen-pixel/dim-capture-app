@@ -7,6 +7,7 @@ import { OfflineQueueProvider } from '@/context/OfflineQueueContext'
 import { ProgressProvider } from '@/context/ProgressContext'
 import { api, type DimWithSku } from '@/lib/api'
 import { clearQueue } from '@/lib/offlineQueue'
+import { clearSyncKey, setSyncKey } from '@/lib/syncKey'
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
@@ -63,9 +64,15 @@ describe('Review page', () => {
     syncMock.mockReset().mockResolvedValue({ synced: 1, failed: 0, pending: 0 })
     updateMock.mockReset().mockResolvedValue({} as never)
     localStorage.setItem('dim-capture-measuredBy', 'Jake')
+    // Provide a sync key so tests that click Sync Now go straight to the sync
+    // call (no prompt). Tests for the prompt itself live in Review.syncKey.test.tsx.
+    setSyncKey('test-secret')
     await clearQueue()
   })
-  afterEach(() => clearQueue())
+  afterEach(async () => {
+    clearSyncKey()
+    await clearQueue()
+  })
 
   it('lists recent captures with their dims', async () => {
     render(<Review />, { wrapper })

@@ -35,6 +35,12 @@ Each still needs `/add-module` to scaffold `brief.md`/`prompt.md`/`smoke.md` bef
 | 12 | `cc-write-authz` | ✅ | feature/hardening | 03, 04, 08 | **Security — the CC-write gate. S6 resolved.** `POST /api/sync/cc` and `POST /api/admin/seed` now require `X-Sync-Key: <SYNC_SECRET>` header. Missing/wrong key → 401; SYNC_SECRET unset → 503 fail-closed. Read routes + /api/dims stay open. Timing-safe compare. tsc clean; 134/134 tests (+18). 2026-06-08. |
 | 13 | `write-concurrency` | ✅ | feature/hardening | 04 | **Robustness.** S8: `saveDim` runs the SKU-check + upsert inside `withAdvisoryLock` with `{ blocking: true }` (`pg_advisory_xact_lock` — BLOCKING variant); concurrent same-SKU captures serialise — the loser waits and completes, never drops the capture. Fixes critical data-loss defect: old `pg_try_advisory_xact_lock` returned null → 200-null body → frontend showed "Saved!" and discarded the queue entry. Sync unchanged (non-blocking by design). `saveDim` return type tightened to `Promise<Dim>`. M1: `getProgress`'s 3 counts in `prisma.$transaction([...])` for consistent snapshot. tsc clean, 116/116 tests. 2026-06-08. |
 
+## Frontend auth module
+
+| # | Name | Status | Branch | Depends on | Notes |
+|---|------|--------|--------|-----------|-------|
+| 14 | `sync-key-prompt` | ✅ | feature/sync-key-prompt | 05, 07, 12 | Operator authorises CC sync from the PWA via a per-session sync key. `lib/syncKey.ts` (sessionStorage store); `api.syncToCC()` sends `X-Sync-Key` header, handles 401 by clearing key; `useSync` skips CC-sync silently when no key; Review "Sync Now" opens prompt dialog on first use. New `components/ui/dialog.tsx`. tsc clean; 59/59 tests (+18). 2026-06-08. |
+
 ## Build order
 01 → 02 → 03 → 04 (all backend) → 05 → 06 → 07 (all frontend) → 08 (deploy)
 

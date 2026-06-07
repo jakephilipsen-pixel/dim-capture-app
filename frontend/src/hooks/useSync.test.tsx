@@ -7,6 +7,7 @@ import { ProgressProvider } from '@/context/ProgressContext'
 import { useSync } from '@/hooks/useSync'
 import { api } from '@/lib/api'
 import { clearQueue, countPendingDims, enqueueDim } from '@/lib/offlineQueue'
+import { clearSyncKey, setSyncKey } from '@/lib/syncKey'
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
@@ -47,11 +48,17 @@ describe('useSync', () => {
     saveMock.mockReset()
     progressMock.mockReset()
     syncMock.mockReset()
+    sessionStorage.clear()
     await clearQueue()
   })
-  afterEach(() => clearQueue())
+  afterEach(async () => {
+    sessionStorage.clear()
+    await clearQueue()
+  })
 
   it('drains the offline queue to POST /api/dims, then triggers CC sync', async () => {
+    // A sync key must be present for the CC-sync step to fire.
+    setSyncKey('test-secret')
     await enqueueDim(payload('sku-1'), '2026-06-03T00:00:00.000Z')
     await enqueueDim(payload('sku-2'), '2026-06-03T00:00:01.000Z')
     saveMock.mockResolvedValue({} as never)
@@ -72,6 +79,7 @@ describe('useSync', () => {
     expect(saveMock).toHaveBeenCalledWith(payload('sku-2'))
     await waitFor(() => expect(syncMock).toHaveBeenCalledTimes(1))
     expect(await countPendingDims()).toBe(0)
+    clearSyncKey()
   })
 
   it('does not trigger CC sync when nothing is pending', async () => {

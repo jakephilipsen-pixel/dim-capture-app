@@ -6,8 +6,18 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { useProgressContext } from '@/context/ProgressContext'
-import { api, type DimWithSku, type SkuDetail } from '@/lib/api'
+import { ApiError, api, type DimWithSku, type SkuDetail } from '@/lib/api'
+import { clearSyncKey, getSyncKey, setSyncKey } from '@/lib/syncKey'
 
 function formatWhen(iso: string): string {
   const d = new Date(iso)
@@ -20,6 +30,11 @@ export default function Review() {
   const [selected, setSelected] = useState<DimWithSku | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
+
+  // Sync-key prompt state.
+  const [promptOpen, setPromptOpen] = useState(false)
+  const [keyDraft, setKeyDraft] = useState('')
+  const [keyError, setKeyError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -43,16 +58,56 @@ export default function Review() {
     void refreshProgress()
   }, [refreshProgress])
 
-  async function syncNow() {
+  /** Attempt the CC sync, handling 401 by prompting the operator. */
+  async function runSync(wasAuthorised = false) {
     setSyncing(true)
+    let succeeded = false
     try {
       await api.syncToCC()
-    } catch {
-      // Surface nothing fatal; the count simply won't drop.
+      succeeded = true
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        // Key missing (pre-check path) or rejected (real 401 from backend).
+        // api.syncToCC already called clearSyncKey() on a real 401; for the
+        // pre-check path (no key) it threw without hitting the network.
+        clearSyncKey()
+        setKeyDraft('')
+        // Show "rejected" only when the operator just entered a key (wasAuthorised).
+        setKeyError(wasAuthorised ? 'Sync key rejected — re-enter.' : '')
+        setPromptOpen(true)
+        setSyncing(false)
+        return
+      }
+      // Surface nothing fatal for other errors; the count simply won't drop.
     } finally {
       setSyncing(false)
-      reload()
     }
+    if (succeeded) reload()
+  }
+
+  /** Called by the Sync Now button. */
+  function syncNow() {
+    if (getSyncKey() === null) {
+      // No key stored — open prompt first.
+      setKeyDraft('')
+      setKeyError('')
+      setPromptOpen(true)
+      return
+    }
+    void runSync()
+  }
+
+  /** Called when the operator submits the prompt. */
+  async function onAuthorise() {
+    const trimmed = keyDraft.trim()
+    if (!trimmed) {
+      setKeyError('Enter the sync key.')
+      return
+    }
+    setSyncKey(trimmed)
+    setPromptOpen(false)
+    setKeyError('')
+    await runSync(/* wasAuthorised */ true)
   }
 
   function editSku(dim: DimWithSku): SkuDetail {
@@ -126,6 +181,56 @@ export default function Review() {
           <li className="px-1 text-sm text-muted-foreground">No captures yet.</li>
         )}
       </ul>
+
+      {/* Sync-key prompt dialog */}
+      <Dialog open={promptOpen} onOpenChange={(open) => !open && setPromptOpen(false)}>
+        <DialogContent aria-describedby="sync-key-desc">
+          <DialogHeader>
+            <DialogTitle>Authorise CC sync</DialogTitle>
+            <DialogDescription id="sync-key-desc">
+              Enter the sync key to push captured dims to CartonCloud. The key
+              is held for this browser session only.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <label htmlFor="sync-key-input" className="text-sm font-medium">
+              Sync key
+            </label>
+            <Input
+              id="sync-key-input"
+              type="password"
+              autoComplete="off"
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void onAuthorise()
+              }}
+              placeholder="Enter sync key"
+            />
+            {keyError && (
+              <p className="text-sm text-destructive" role="alert">
+                {keyError}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setPromptOpen(false)
+                setKeyDraft('')
+                setKeyError('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => void onAuthorise()}>
+              Authorise &amp; Sync
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Sheet open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
         <SheetContent side="bottom">

@@ -21,11 +21,9 @@ check_status() {
 # Health endpoint
 check_status "$BASE_URL/api/health" GET 200
 
-# Stub routes return 501
-check_status "$BASE_URL/api/skus"       GET  501
-check_status "$BASE_URL/api/dims"       GET  501
-check_status "$BASE_URL/api/dims"       POST 501
-check_status "$BASE_URL/api/sync/cc"    POST 501
-check_status "$BASE_URL/api/admin/seed" POST 501
+# Core error handling: an unknown route is handled by the 404 + error
+# middleware backend-core owns (the route stubs it originally shipped are now
+# implemented by later modules, so the old 501-stub assertions are retired).
+check_status "$BASE_URL/api/this-route-does-not-exist" GET 404
 
 echo "All smoke checks passed."

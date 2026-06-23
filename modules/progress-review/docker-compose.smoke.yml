@@ -30,7 +30,7 @@ services:
       NODE_ENV: production
       MOCK_PORT: "9099"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- 'http://localhost:9099/products?barcode=9311111000011&warehouseAccountId=wh-forage' | grep -q cc-1"]
+      test: ["CMD-SHELL", "wget -qO- --post-data='grant_type=client_credentials' 'http://localhost:9099/uaa/oauth/token' | grep -q access_token"]
       interval: 3s
       timeout: 5s
       retries: 10
@@ -45,10 +45,12 @@ services:
       NODE_ENV: production
       PORT: "3005"
       DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
-      CC_API_KEY: smoke-key
+      CC_CLIENT_ID: smoke-id
+      CC_CLIENT_SECRET: smoke-secret
       CC_TENANT_ID: smoke-tenant
-      CC_WAREHOUSE_ID: wh-forage
+      CC_CUSTOMER_ID: d4810e1e-91ab-43ed-b68e-b72bd858b122
       CC_BASE_URL: http://mock-cc:9099
+      SYNC_SECRET: smoke-secret
       FRONTEND_URL: http://localhost:5178
     depends_on:
       postgres:

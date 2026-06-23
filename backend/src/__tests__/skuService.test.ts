@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the two singletons skuService depends on. Factories are hoisted by
 // vitest, so the service (imported below) binds to these mocks.
@@ -68,17 +68,16 @@ const sku = vi.mocked(prisma.sku, true);
 const dim = vi.mocked(prisma.dim, true);
 const cc = vi.mocked(ccClient, true);
 
-const WAREHOUSE = "wh-forage";
-
-/** A CC product, dims present or absent. */
+/** A CC product (warehouse-product summary), dims present or absent. */
 function ccProduct(i: number, withDims: boolean) {
   return {
     id: `prod-${i}`,
+    code: `code-${i}`,
     barcode: `bc-${i}`,
     name: `Product ${i}`,
-    length: withDims ? 100 : null,
-    width: withDims ? 50 : null,
-    height: withDims ? 25 : null,
+    length: withDims ? 0.1 : null,
+    width: withDims ? 0.05 : null,
+    height: withDims ? 0.025 : null,
     weight: withDims ? 1.2 : null,
   };
 }
@@ -92,7 +91,6 @@ beforeEach(() => {
   // resetAllMocks (not clearAllMocks) so queued mockResolvedValueOnce pages
   // don't leak between tests — clearAllMocks leaves the "once" queue intact.
   vi.resetAllMocks();
-  process.env.CC_WAREHOUSE_ID = WAREHOUSE;
   // Default: upsert resolves to an empty object (seed ignores the result).
   sku.upsert.mockResolvedValue({} as never);
   // Re-establish the $transaction implementation wiped by resetAllMocks.
@@ -105,10 +103,6 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  delete process.env.CC_WAREHOUSE_ID;
-});
-
 describe("seedSkus", () => {
   it("paginates until a short page and upserts every product", async () => {
     // 100 (full page) then 30 (short page → stop). Distinct ids across pages.
@@ -118,8 +112,8 @@ describe("seedSkus", () => {
 
     const report = await seedSkus();
 
-    expect(cc.listProducts).toHaveBeenNthCalledWith(1, WAREHOUSE, 1, 100);
-    expect(cc.listProducts).toHaveBeenNthCalledWith(2, WAREHOUSE, 2, 100);
+    expect(cc.listProducts).toHaveBeenNthCalledWith(1, 1, 100);
+    expect(cc.listProducts).toHaveBeenNthCalledWith(2, 2, 100);
     expect(cc.listProducts).toHaveBeenCalledTimes(2);
     expect(sku.upsert).toHaveBeenCalledTimes(130);
     expect(report).toEqual({
@@ -156,20 +150,20 @@ describe("seedSkus", () => {
     });
   });
 
-  it("skips malformed CC rows missing id or barcode", async () => {
+  it("skips rows missing id, but stores barcode-less rows (barcode is nullable)", async () => {
     cc.listProducts
       .mockResolvedValueOnce([
         ccProduct(1, true),
-        { id: "", barcode: "bc-x", name: "no id", length: 1, width: 1, height: 1, weight: 1 },
-        { id: "prod-2", barcode: "", name: "no barcode", length: 1, width: 1, height: 1, weight: 1 },
+        { id: "", code: "x", barcode: "bc-x", name: "no id", length: null, width: null, height: null, weight: null },
+        { id: "prod-2", code: "y", barcode: null, name: "no barcode", length: null, width: null, height: null, weight: null },
       ])
       .mockResolvedValueOnce([]);
 
     const report = await seedSkus();
 
     expect(report.fetched).toBe(3); // all three came back from CC
-    expect(report.upserted).toBe(1); // only the valid one written
-    expect(sku.upsert).toHaveBeenCalledTimes(1);
+    expect(report.upserted).toBe(2); // the valid one + the barcode-less one; only the no-id row skipped
+    expect(sku.upsert).toHaveBeenCalledTimes(2);
   });
 
   it("returns an all-zero report when CC has no products", async () => {
@@ -189,16 +183,6 @@ describe("seedSkus", () => {
     expect(cc.listProducts).toHaveBeenCalledTimes(1); // no second page requested
     expect(report.pages).toBe(1);
     expect(report.fetched).toBe(5);
-  });
-
-  it("throws a 500 AppError when CC_WAREHOUSE_ID is unset", async () => {
-    delete process.env.CC_WAREHOUSE_ID;
-
-    await expect(seedSkus()).rejects.toMatchObject({
-      constructor: AppError,
-      statusCode: 500,
-    });
-    expect(cc.listProducts).not.toHaveBeenCalled();
   });
 
   // M2a — bucket exhausted during seed must surface as 429, not 500.
@@ -283,15 +267,17 @@ describe("getSkuByBarcode", () => {
     sku.findUnique.mockResolvedValue(null as never);
     cc.lookupByBarcode.mockResolvedValue({
       id: "z",
+      code: "ZUC",
       barcode: "999",
       name: "Zucchini",
-      length: 200,
-      width: 60,
-      height: 60,
+      length: 0.2,
+      width: 0.06,
+      height: 0.06,
       weight: 0.3,
     });
     sku.upsert.mockResolvedValue({
       id: "z",
+      code: "ZUC",
       barcode: "999",
       name: "Zucchini",
       ccDimsCaptured: true,
@@ -300,10 +286,13 @@ describe("getSkuByBarcode", () => {
 
     const result = await getSkuByBarcode("999");
 
-    expect(cc.lookupByBarcode).toHaveBeenCalledWith("999", WAREHOUSE);
+    expect(cc.lookupByBarcode).toHaveBeenCalledWith("999");
     expect(sku.upsert).toHaveBeenCalledTimes(1);
+    // The scanned barcode is stored (so the next scan is a DB hit).
+    expect(sku.upsert.mock.calls[0][0]).toMatchObject({ update: { barcode: "999" } });
     expect(result).toEqual({
       id: "z",
+      code: "ZUC",
       barcode: "999",
       name: "Zucchini",
       hasDims: false,

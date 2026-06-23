@@ -8,11 +8,18 @@
  * run — it's caught per-item, logged, left `syncedToCC = false`, and retried on
  * the next call.
  *
- * CC product id == `Dim.skuId`: `Sku.id` is the CartonCloud product UUID
- * (backend-core schema), so no barcode lookup is needed before PATCHing.
+ * CC warehouse-product id == `Dim.skuId`: `Sku.id` is the CartonCloud
+ * warehouse-product UUID (module 16 re-seed), so no barcode lookup is needed
+ * before writing — `patchProductDims` GETs the product, resolves its default UoM,
+ * and writes dims there.
  *
- * Units: stored mm / kg are passed to CC verbatim — cc-client does no
- * conversion, and CC expects mm for L/W/H and kg for weight.
+ * Units: stored mm / kg; `ccClient.patchProductDims` converts mm→m at the CC
+ * boundary (CC stores carton dims in metres).
+ *
+ * Terminal states per dim (module 16): synced (written or already-correct),
+ * failed (retryable — left unsynced, retried next run), blocked (CC refuses the
+ * write because a sibling UoM name is invalid → `syncBlockedReason` set, EXCLUDED
+ * from the retry set until a re-capture clears it).
  */
 import { prisma, withAdvisoryLock } from "../lib/db";
 import { logger } from "../middleware/logger";
@@ -36,11 +43,13 @@ const SYNC_LOCK_KEY = 7_213_544_982_017_336_001n;
 
 /** Outcome of one `POST /api/sync/cc` run. */
 export interface SyncReport {
-  /** Dims successfully PATCHed to CC this run. */
+  /** Dims successfully written (or already correct) in CC this run. */
   synced: number;
   /** Dims that errored this run (left unsynced, retried next call). */
   failed: number;
-  /** Dims still `syncedToCC = false` after the run (live DB count). */
+  /** Dims CC refused this run because a sibling UoM name is invalid (name-poison). */
+  blocked: number;
+  /** Retryable dims still unsynced after the run (live count, EXCLUDES blocked). */
   pending: number;
 }
 
@@ -94,8 +103,11 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
     prisma,
     SYNC_LOCK_KEY,
     async (tx) => {
+      // Only genuinely retryable dims: unsynced AND not already blocked by a
+      // name-poison (blocked dims can't succeed until CC names are fixed, so a
+      // re-capture must clear `syncBlockedReason` to retry them).
       const unsynced = await tx.dim.findMany({
-        where: { syncedToCC: false },
+        where: { syncedToCC: false, syncBlockedReason: null },
         orderBy: { measuredAt: "asc" },
       });
 
@@ -107,21 +119,37 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
 
       let synced = 0;
       let failed = 0;
+      let blocked = 0;
 
       for (const batch of batches) {
         for (const dim of batch) {
           try {
-            await ccClient.patchProductDims(dim.skuId, {
+            const outcome = await ccClient.patchProductDims(dim.skuId, {
               length: dim.lengthMm,
               width: dim.widthMm,
               height: dim.heightMm,
               weight: dim.weightKg,
             });
-            await tx.dim.update({
-              where: { id: dim.id },
-              data: { syncedToCC: true, syncedAt: new Date() },
-            });
-            synced += 1;
+            if (outcome.status === "blocked") {
+              // CC can't accept this write (name-poison). Record the reason and
+              // leave it OUT of the retry set; a re-capture clears the reason.
+              blocked += 1;
+              await tx.dim.update({
+                where: { id: dim.id },
+                data: { syncBlockedReason: outcome.reason },
+              });
+              log.warn(
+                { dimId: dim.id, skuId: dim.skuId, reason: outcome.reason },
+                "CC dim sync blocked — name-poisoned product, excluded from retry",
+              );
+            } else {
+              // written or noop (already correct) → synced.
+              await tx.dim.update({
+                where: { id: dim.id },
+                data: { syncedToCC: true, syncedAt: new Date(), syncBlockedReason: null },
+              });
+              synced += 1;
+            }
           } catch (err) {
             // Isolate the failure: log it, leave the dim unsynced, keep going.
             failed += 1;
@@ -133,12 +161,14 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
         }
       }
 
-      // `pending` is the live truth after the run, not an inferred count — covers
-      // any rows that became unsynced concurrently as well as this run's failures.
-      const pending = await tx.dim.count({ where: { syncedToCC: false } });
+      // `pending` is the live truth after the run — retryable unsynced only
+      // (excludes blocked). `blocked` is this run's newly-blocked count.
+      const pending = await tx.dim.count({
+        where: { syncedToCC: false, syncBlockedReason: null },
+      });
 
-      log.info({ synced, failed, pending }, "CC dim sync complete");
-      return { synced, failed, pending };
+      log.info({ synced, failed, blocked, pending }, "CC dim sync complete");
+      return { synced, failed, blocked, pending };
     },
     { timeout: 120_000, maxWait: 10_000 },
   );
@@ -146,12 +176,14 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
   if (result === null) {
     // Another sync run already holds the lock. Don't double-PATCH — report
     // the live pending count and let the in-flight winner do the work.
-    const pending = await prisma.dim.count({ where: { syncedToCC: false } });
+    const pending = await prisma.dim.count({
+      where: { syncedToCC: false, syncBlockedReason: null },
+    });
     log.info(
       { pending },
       "CC dim sync already running — skipping this run (advisory lock held)",
     );
-    return { synced: 0, failed: 0, pending };
+    return { synced: 0, failed: 0, blocked: 0, pending };
   }
 
   return result;

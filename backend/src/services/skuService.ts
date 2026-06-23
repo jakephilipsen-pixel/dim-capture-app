@@ -21,7 +21,8 @@ const SEED_PAGE_SIZE = 100;
 /** One SKU as the list/capture UI sees it. */
 export interface SkuSummary {
   id: string;
-  barcode: string;
+  code: string | null; // SKU code (references.code), for code-based search
+  barcode: string | null; // from the default/first UoM; null if none
   name: string;
   hasDims: boolean; // a local Dim row exists for this SKU
 }
@@ -36,7 +37,8 @@ export interface SkuListResponse {
 /** `GET /api/skus/:barcode` response. `source` records where the hit came from. */
 export interface SkuDetail {
   id: string;
-  barcode: string;
+  code: string | null;
+  barcode: string | null;
   name: string;
   hasDims: boolean;
   ccDimsCaptured: boolean;
@@ -60,15 +62,6 @@ export interface SeedReport {
   ccDimsPresent: number; // of those, how many already had dims in CC
 }
 
-/** Required for any CC-touching route. Surfaces as a 500 if unset. */
-function warehouseId(): string {
-  const id = process.env.CC_WAREHOUSE_ID;
-  if (!id) {
-    throw new AppError("CC_WAREHOUSE_ID is not configured", 500);
-  }
-  return id;
-}
-
 /** A product "has dims in CC" when L/W/H are all present (weight is optional). */
 function hasCcDims(p: CcProduct): boolean {
   return p.length !== null && p.width !== null && p.height !== null;
@@ -80,7 +73,6 @@ function hasCcDims(p: CcProduct): boolean {
  * Paginates until CC returns a short (or empty) page.
  */
 export async function seedSkus(): Promise<SeedReport> {
-  const wh = warehouseId();
   let page = 1;
   let pages = 0;
   let fetched = 0;
@@ -94,7 +86,7 @@ export async function seedSkus(): Promise<SeedReport> {
     // to retry later.
     let products;
     try {
-      products = await ccClient.listProducts(wh, page, SEED_PAGE_SIZE);
+      products = await ccClient.listProducts(page, SEED_PAGE_SIZE);
     } catch (err) {
       if (err instanceof CcRateLimitError) {
         log.warn({ page }, "seed rate limit hit — seed bucket exhausted");
@@ -115,17 +107,19 @@ export async function seedSkus(): Promise<SeedReport> {
     fetched += products.length;
 
     for (const p of products) {
-      // id is the primary key and barcode is unique+required — a CC row missing
-      // either can't be stored, so skip it rather than crash the whole seed.
-      if (!p.id || !p.barcode) {
-        log.warn({ id: p.id, barcode: p.barcode }, "skipping CC product missing id/barcode");
+      // id is the primary key — a CC row missing it can't be stored, so skip it
+      // rather than crash the whole seed. barcode is now nullable (it lives on the
+      // UoM and not every product has one); a barcode-less SKU is still stored
+      // (findable by code) but isn't scannable.
+      if (!p.id) {
+        log.warn({ code: p.code }, "skipping CC product missing id");
         continue;
       }
       const ccDims = hasCcDims(p);
       await prisma.sku.upsert({
         where: { id: p.id },
-        create: { id: p.id, barcode: p.barcode, name: p.name, ccDimsCaptured: ccDims },
-        update: { barcode: p.barcode, name: p.name, ccDimsCaptured: ccDims },
+        create: { id: p.id, code: p.code, barcode: p.barcode, name: p.name, ccDimsCaptured: ccDims },
+        update: { code: p.code, barcode: p.barcode, name: p.name, ccDimsCaptured: ccDims },
       });
       upserted += 1;
       if (ccDims) ccDimsPresent += 1;
@@ -144,6 +138,7 @@ export async function listSkus(): Promise<SkuListResponse> {
   const rows = await prisma.sku.findMany({
     select: {
       id: true,
+      code: true,
       barcode: true,
       name: true,
       dims: { select: { id: true } },
@@ -153,6 +148,7 @@ export async function listSkus(): Promise<SkuListResponse> {
 
   const skus: SkuSummary[] = rows.map((r) => ({
     id: r.id,
+    code: r.code,
     barcode: r.barcode,
     name: r.name,
     hasDims: r.dims !== null,
@@ -172,6 +168,7 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
     where: { barcode },
     select: {
       id: true,
+      code: true,
       barcode: true,
       name: true,
       ccDimsCaptured: true,
@@ -181,6 +178,7 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
   if (local) {
     return {
       id: local.id,
+      code: local.code,
       barcode: local.barcode,
       name: local.name,
       hasDims: local.dims !== null,
@@ -196,7 +194,7 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
   // it extends CcApiError but warrants a more precise 504 status.
   let product: CcProduct | null;
   try {
-    product = await ccClient.lookupByBarcode(barcode, warehouseId());
+    product = await ccClient.lookupByBarcode(barcode);
   } catch (err) {
     if (err instanceof CcRateLimitError) {
       log.warn({ barcode }, "CC rate limit hit during barcode fallback");
@@ -213,24 +211,27 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
     throw err;
   }
 
-  if (!product || !product.id || !product.barcode) {
+  if (!product || !product.id) {
     throw new AppError(`SKU not found for barcode ${barcode}`, 404);
   }
 
   const ccDims = hasCcDims(product);
   // Upsert by id (not create) so a barcode miss whose product id already exists
-  // can't blow up on the unique-id constraint.
+  // can't blow up on the unique-id constraint. Store the SCANNED barcode so the
+  // next scan of it is a DB hit (it matched one of the product's UoM barcodes).
   const saved = await prisma.sku.upsert({
     where: { id: product.id },
     create: {
       id: product.id,
-      barcode: product.barcode,
+      code: product.code,
+      barcode,
       name: product.name,
       ccDimsCaptured: ccDims,
     },
-    update: { barcode: product.barcode, name: product.name, ccDimsCaptured: ccDims },
+    update: { code: product.code, barcode, name: product.name, ccDimsCaptured: ccDims },
     select: {
       id: true,
+      code: true,
       barcode: true,
       name: true,
       ccDimsCaptured: true,
@@ -241,6 +242,7 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
   log.info({ barcode, id: saved.id }, "barcode resolved via CC fallback and upserted");
   return {
     id: saved.id,
+    code: saved.code,
     barcode: saved.barcode,
     name: saved.name,
     hasDims: saved.dims !== null,

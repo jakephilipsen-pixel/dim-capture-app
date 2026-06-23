@@ -11,8 +11,9 @@ datasource db {
 }
 
 model Sku {
-  id              String   @id                 // CartonCloud product UUID
-  barcode         String   @unique
+  id              String   @id                 // CartonCloud WAREHOUSE-product UUID (module 16)
+  code            String?                       // SKU code from references.code (e.g. "AE-BLA")
+  barcode         String?  @unique              // from the default/first UoM; nullable (some UoMs have none)
   name            String
   ccDimsCaptured  Boolean  @default(false)     // dims already in CC before we started
   createdAt       DateTime @default(now())
@@ -31,6 +32,10 @@ model Dim {
   measuredAt  DateTime  @default(now())
   syncedToCC  Boolean   @default(false)
   syncedAt    DateTime?
+  // Module 16: set when CC refuses the write because a sibling UoM name is invalid
+  // (name-poison). Non-null = blocked: excluded from the retry/pending set until a
+  // re-capture clears it. Consumed by the module-17 operator UI.
+  syncBlockedReason String?
   notes       String?
   // Floor camera flow (feature/floor-camera-flow): the operator-selected carton
   // class and an optional carton photo that rides along with the dims. Both are

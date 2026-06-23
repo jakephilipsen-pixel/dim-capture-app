@@ -24,7 +24,7 @@
  *   never escapes to callers.
  *
  * Units: callers pass dims in the app's canonical mm + kg. CartonCloud stores
- * carton L/W/H in CENTIMETRES, so `patchProductDims` converts mm→cm (÷10) at the
+ * carton L/W/H in METRES, so `patchProductDims` converts mm→m (÷1000) at the
  * write boundary; weight (kg) is unchanged.
  */
 import { logger } from "../middleware/logger";
@@ -75,8 +75,8 @@ export interface CcProduct {
 
 /**
  * Dimension payload pushed to CC. Callers pass the app's canonical **mm** for
- * L/W/H and **kg** for weight; `patchProductDims` converts mm→cm at the CC
- * boundary (CartonCloud stores carton dims in centimetres).
+ * L/W/H and **kg** for weight; `patchProductDims` converts mm→m at the CC
+ * boundary (CartonCloud stores carton dims in metres).
  */
 export interface CcDimPayload {
   length: number;
@@ -85,9 +85,12 @@ export interface CcDimPayload {
   weight: number;
 }
 
-/** Convert a millimetre length to centimetres (CC's unit), rounded to kill FP noise. */
-function mmToCm(mm: number): number {
-  return Math.round((mm / 10) * 1000) / 1000;
+/** Millimetres per metre — the mm→m factor for the CC write boundary. */
+const MM_PER_METRE = 1000;
+
+/** Convert a millimetre length to metres (CC's unit), rounded to 4 dp to kill FP noise. */
+function mmToMetres(mm: number): number {
+  return Math.round((mm / MM_PER_METRE) * 10000) / 10000;
 }
 
 /** Raised when the rate-limit bucket is empty — the request is NOT sent. */
@@ -431,10 +434,10 @@ export class CcClient {
    * `PATCH /products/{productId}` with `{ length, width, height, weight }`.
    *
    * UNITS: callers pass `CcDimPayload` in the app's canonical **mm / kg** (the DB
-   * unit). CartonCloud stores carton L/W/H in **centimetres**, so we convert
-   * mm→cm (÷10) here at the CC boundary; weight (kg) is sent unchanged. This was
-   * proven in the parent gocold-wms-flow repo — sending mm wrote dims 10× too
-   * large. Converting in this one method keeps every sync path correct.
+   * unit). CartonCloud stores carton L/W/H in **metres**, so we convert
+   * mm→m (÷1000) here at the CC boundary; weight (kg) is sent unchanged
+   * (Jake confirmed metres against CC, 24 Jun 2026 — supersedes the earlier
+   * "cm" read). Converting in this one method keeps every sync path correct.
    *
    * Throws `CcNotFoundError` on 404, `CcApiError` on any other non-2xx response.
    */
@@ -448,9 +451,9 @@ export class CcClient {
         method: "PATCH",
         headers: this.headers(true),
         body: JSON.stringify({
-          length: mmToCm(dims.length),
-          width: mmToCm(dims.width),
-          height: mmToCm(dims.height),
+          length: mmToMetres(dims.length),
+          width: mmToMetres(dims.width),
+          height: mmToMetres(dims.height),
           weight: dims.weight,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),

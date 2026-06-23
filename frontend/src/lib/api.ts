@@ -55,6 +55,10 @@ export interface SkuDetail {
   source: 'db' | 'cc'
 }
 
+/** The carton classes the Floor capture toggle offers (Dim.productType). */
+export const PRODUCT_TYPES = ['Dry', 'Ambient', 'Chilled', 'Frozen'] as const
+export type ProductType = (typeof PRODUCT_TYPES)[number]
+
 /** A persisted dimension record (POST/PUT /api/dims). */
 export interface Dim {
   id: number
@@ -68,6 +72,8 @@ export interface Dim {
   syncedToCC: boolean
   syncedAt: string | null
   notes: string | null
+  productType: string | null
+  photoPath: string | null
 }
 
 /** POST /api/dims body. */
@@ -79,6 +85,7 @@ export interface SaveDimPayload {
   weightKg: number
   measuredBy: string
   notes?: string
+  productType?: ProductType
 }
 
 /** PUT /api/dims/:id body (a correction — no skuId). */
@@ -89,6 +96,7 @@ export interface UpdateDimPayload {
   weightKg: number
   measuredBy: string
   notes?: string
+  productType?: ProductType
 }
 
 /** POST /api/sync/cc */
@@ -195,6 +203,40 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     })
+  },
+
+  /**
+   * Attach a carton photo to a saved dim. The body is the raw JPEG blob with a
+   * `image/jpeg` content type (the backend parses it with a route-local raw
+   * parser, bypassing the JSON limit). Returns the updated Dim. Errors map to
+   * ApiError exactly like `request` — status 0 when the backend is unreachable,
+   * so the caller can queue the photo offline.
+   */
+  async savePhoto(dimId: number, jpeg: Blob): Promise<Dim> {
+    let res: Response
+    try {
+      res = await fetch(`${API_BASE}/api/dims/${dimId}/photo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg', Accept: 'application/json' },
+        body: jpeg,
+      })
+    } catch (cause) {
+      throw new ApiError(0, 'Network error: backend unreachable', cause)
+    }
+    const text = await res.text()
+    const data: unknown = text ? safeJson(text) : null
+    if (!res.ok) {
+      const message =
+        (isRecord(data) && typeof data.error === 'string' && data.error) ||
+        `Request failed: ${res.status} ${res.statusText}`
+      throw new ApiError(res.status, message, data)
+    }
+    return data as Dim
+  },
+
+  /** URL of a dim's carton photo (GET). Append a cache-buster on re-capture if needed. */
+  photoUrl(dimId: number): string {
+    return `${API_BASE}/api/dims/${dimId}/photo`
   },
 
   async syncToCC(): Promise<SyncReport> {

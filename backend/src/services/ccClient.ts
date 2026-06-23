@@ -369,7 +369,10 @@ export class CcClient {
     this.clientId = opts.clientId;
     this.clientSecret = opts.clientSecret;
     this.tenantId = opts.tenantId;
-    this.baseUrl = (opts.baseUrl ?? CC_DEFAULT_BASE_URL).replace(/\/+$/, "");
+    // `||` (not `??`) so an empty-string baseUrl — e.g. the documented blank
+    // `CC_BASE_URL=` in .env.example meaning "use the default" — falls back to
+    // CC_DEFAULT_BASE_URL instead of producing a relative ("/uaa/...") URL.
+    this.baseUrl = (opts.baseUrl || CC_DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.customerId = opts.customerId ?? process.env.CC_CUSTOMER_ID ?? FORAGE_CUSTOMER_ID;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? Number(process.env.CC_TIMEOUT_MS ?? CC_DEFAULT_TIMEOUT_MS);

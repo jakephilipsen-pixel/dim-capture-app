@@ -1,14 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { CcApiError, CcClient } from "../services/ccClient";
+import { CcApiError, CcClient, FORAGE_CUSTOMER_ID } from "../services/ccClient";
 
-const BASE = "https://cc.test/api/v1";
-const WAREHOUSE = "wh-456";
+const BASE = "https://cc.test";
+const TENANT = "t";
 
+/** Mock fetch that auto-answers the token endpoint and delegates data calls. */
 function makeClient(responder: (url: string) => Response | Promise<Response>) {
-  const fetchMock = vi.fn((url: string) => responder(url));
+  const fetchMock = vi.fn((url: string) => {
+    if (String(url).endsWith("/uaa/oauth/token")) {
+      return json({ access_token: "tok", expires_in: 3600 });
+    }
+    return responder(String(url));
+  });
   const client = new CcClient({
-    apiKey: "k",
-    tenantId: "t",
+    clientId: "id",
+    clientSecret: "secret",
+    tenantId: TENANT,
     baseUrl: BASE,
     fetchImpl: fetchMock as unknown as typeof fetch,
   });
@@ -16,60 +23,52 @@ function makeClient(responder: (url: string) => Response | Promise<Response>) {
 }
 
 const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-describe("CcClient.listProducts", () => {
-  it("requests the right URL with page + pageSize and maps products", async () => {
+const raw = (id: string, code: string, over: Record<string, unknown> = {}) => ({
+  id,
+  references: { code },
+  name: code,
+  customer: { id: FORAGE_CUSTOMER_ID },
+  defaultUnitOfMeasure: "EA",
+  unitOfMeasures: { EA: { id: `${id}-ea`, name: "Each", barcode: `bc-${id}` } },
+  ...over,
+});
+
+describe("CcClient.listProducts (warehouse-products v8 search)", () => {
+  it("requests the search path with page + size and maps products", async () => {
     const { client, fetchMock } = makeClient(() =>
       json([
-        { id: "p1", barcode: "b1", name: "One", length: 10, width: 5, height: 2, weight: 1 },
-        { id: "p2", barcode: "b2", name: "Two", length: null, width: null, height: null, weight: null },
+        raw("p1", "ONE", {
+          unitOfMeasures: { EA: { id: "p1-ea", name: "Each", barcode: "b1", length: 0.1, width: 0.05, height: 0.02, weight: 1 } },
+        }),
+        raw("p2", "TWO"),
       ]),
     );
 
-    const products = await client.listProducts(WAREHOUSE, 1, 100);
+    const products = await client.listProducts(1, 100);
 
-    const url = new URL(fetchMock.mock.calls[0][0] as string);
-    expect(url.origin + url.pathname).toBe(`${BASE}/products`);
-    expect(url.searchParams.get("warehouseAccountId")).toBe(WAREHOUSE);
+    const dataCall = fetchMock.mock.calls.find((c) => !String(c[0]).endsWith("/uaa/oauth/token"));
+    if (!dataCall) throw new Error("no data call recorded");
+    const url = new URL(dataCall[0] as string);
+    expect(url.origin + url.pathname).toBe(`${BASE}/tenants/${TENANT}/warehouse-products/search`);
     expect(url.searchParams.get("page")).toBe("1");
-    expect(url.searchParams.get("pageSize")).toBe("100");
+    expect(url.searchParams.get("size")).toBe("100");
 
     expect(products).toHaveLength(2);
-    expect(products[0]).toEqual({
-      id: "p1",
-      barcode: "b1",
-      name: "One",
-      length: 10,
-      width: 5,
-      height: 2,
-      weight: 1,
-    });
+    expect(products[0]).toEqual({ id: "p1", code: "ONE", barcode: "b1", name: "ONE", length: 0.1, width: 0.05, height: 0.02, weight: 1 });
     expect(products[1].length).toBeNull();
   });
 
-  it("unwraps a { data: [...] } envelope", async () => {
-    const { client } = makeClient(() =>
-      json({ data: [{ id: "p9", barcode: "b9", name: "Nine" }] }),
-    );
-
-    const products = await client.listProducts(WAREHOUSE, 2, 100);
-
-    expect(products).toHaveLength(1);
-    expect(products[0].id).toBe("p9");
-  });
-
-  it("treats a 404 page as the end of the result set (empty)", async () => {
+  it("throws on a 404 (a supported endpoint 404 = misconfigured path/tenant, NOT end-of-pagination)", async () => {
+    // End-of-pagination is signalled by an empty/short page, never by a 404.
+    // Masking a 404 would let a broken seed report a silent zero-product success.
     const { client } = makeClient(() => new Response("", { status: 404 }));
-    const products = await client.listProducts(WAREHOUSE, 5, 100);
-    expect(products).toEqual([]);
+    await expect(client.listProducts(5, 100)).rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it("throws CcApiError on a non-2xx (non-404) response", async () => {
+  it("throws CcApiError on a non-2xx response", async () => {
     const { client } = makeClient(() => new Response("boom", { status: 500 }));
-    await expect(client.listProducts(WAREHOUSE, 1, 100)).rejects.toBeInstanceOf(CcApiError);
+    await expect(client.listProducts(1, 100)).rejects.toBeInstanceOf(CcApiError);
   });
 });

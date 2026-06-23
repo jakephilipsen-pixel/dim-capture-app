@@ -71,7 +71,7 @@ export interface DimWithSku {
   notes: string | null;
   productType: string | null;
   photoPath: string | null;
-  sku: { name: string; barcode: string };
+  sku: { name: string; barcode: string | null };
 }
 
 /**
@@ -215,8 +215,15 @@ export async function saveDim(raw: unknown): Promise<import("@prisma/client").Di
       return tx.dim.upsert({
         where: { skuId: input.skuId },
         create: { skuId: input.skuId, ...measurements },
-        // Re-capture: overwrite measurements and force a re-sync.
-        update: { ...measurements, measuredAt: new Date(), syncedToCC: false, syncedAt: null },
+        // Re-capture: overwrite measurements and force a re-sync. Clearing
+        // syncBlockedReason re-arms a previously name-poisoned dim for retry.
+        update: {
+          ...measurements,
+          measuredAt: new Date(),
+          syncedToCC: false,
+          syncedAt: null,
+          syncBlockedReason: null,
+        },
       });
     },
     { blocking: true },
@@ -263,6 +270,7 @@ export async function updateDim(id: number, raw: unknown) {
       measuredAt: new Date(),
       syncedToCC: false,
       syncedAt: null,
+      syncBlockedReason: null,
     },
   });
 }

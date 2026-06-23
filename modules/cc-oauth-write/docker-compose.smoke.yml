@@ -1,0 +1,59 @@
+# Smoke stack for cc-oauth-write (module 16).
+#
+# Boots the REAL backend image (prisma migrate deploy + serve) against a
+# throwaway Postgres and an in-container mock CartonCloud speaking the v8
+# OAuth2/warehouse-products contract (dist/smoke/mockCc.js). No real CartonCloud.
+#
+# Happy path: seed (v8 warehouse-products search) → barcode lookup → capture two
+# dims → sync (one written + read-back verified, one name-poisoned → blocked).
+# Host port 3011 for the backend (3010 is dim-api's smoke). Postgres + mock are
+# internal-only.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dimcapture
+      POSTGRES_USER: gocold
+      POSTGRES_PASSWORD: gocold
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mock-cc:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/mockCc.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='grant_type=client_credentials' 'http://localhost:9099/uaa/oauth/token' | grep -q access_token"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    ports:
+      - "3011:3005"
+    environment:
+      NODE_ENV: production
+      PORT: "3005"
+      DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
+      CC_CLIENT_ID: smoke-id
+      CC_CLIENT_SECRET: smoke-secret
+      CC_TENANT_ID: smoke-tenant
+      CC_CUSTOMER_ID: d4810e1e-91ab-43ed-b68e-b72bd858b122
+      CC_BASE_URL: http://mock-cc:9099
+      SYNC_SECRET: smoke-secret
+      FRONTEND_URL: http://localhost:5175
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-cc:
+        condition: service_healthy

@@ -1,258 +1,344 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  CcApiError,
   CcClient,
   CcNotFoundError,
   CcRateLimitError,
+  FORAGE_CUSTOMER_ID,
   type CcDimPayload,
 } from "../services/ccClient";
 
-const API_KEY = "test-key";
-const TENANT = "tenant-123";
-const WAREHOUSE = "wh-456";
-const BASE = "https://cc.test/api/v1";
+/** Narrow `T | undefined` to `T`, throwing in tests instead of a `!` assertion. */
+const must = <T>(v: T | undefined): T => {
+  if (v === undefined) throw new Error("expected a value but got undefined");
+  return v;
+};
 
-/** Build a client whose fetch is a controllable mock, with a frozen clock. */
+const CLIENT_ID = "test-id";
+const CLIENT_SECRET = "test-secret";
+const TENANT = "tenant-123";
+const BASE = "https://cc.test";
+const TOKEN_URL = `${BASE}/uaa/oauth/token`;
+const SEARCH_PATH = `/tenants/${TENANT}/warehouse-products/search`;
+const expectedBasic = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")}`;
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+/**
+ * Build a client whose fetch is a controllable mock. The OAuth2 token endpoint
+ * is auto-answered; `dataResponder` handles everything else. `calls`/`tokenCalls`
+ * record data vs token fetches separately for assertions.
+ */
 function makeClient(opts?: {
-  responder?: (url: string, init: RequestInit) => Response | Promise<Response>;
+  dataResponder?: (url: string, init: RequestInit) => Response | Promise<Response>;
   clock?: () => number;
-  capacity?: number;
-  refillPerSec?: number;
+  syncCapacity?: number;
+  syncRefillPerSec?: number;
+  seedCapacity?: number;
+  seedRefillPerSec?: number;
+  tokenResponder?: () => Response;
 }) {
-  const fetchMock = vi.fn(
-    opts?.responder ?? (() => new Response("[]", { status: 200 })),
-  );
+  const calls: { url: string; init: RequestInit }[] = [];
+  const tokenCalls: { url: string; init: RequestInit }[] = [];
+  const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith("/uaa/oauth/token")) {
+      tokenCalls.push({ url: u, init });
+      return opts?.tokenResponder?.() ?? json({ access_token: "tok-abc", expires_in: 3600 });
+    }
+    calls.push({ url: u, init });
+    return opts?.dataResponder ? opts.dataResponder(u, init) : json([]);
+  });
   const client = new CcClient({
-    apiKey: API_KEY,
+    clientId: CLIENT_ID,
+    clientSecret: CLIENT_SECRET,
     tenantId: TENANT,
     baseUrl: BASE,
     fetchImpl: fetchMock as unknown as typeof fetch,
     now: opts?.clock,
-    capacity: opts?.capacity,
-    refillPerSec: opts?.refillPerSec,
+    syncCapacity: opts?.syncCapacity,
+    syncRefillPerSec: opts?.syncRefillPerSec,
+    seedCapacity: opts?.seedCapacity,
+    seedRefillPerSec: opts?.seedRefillPerSec,
   });
-  return { client, fetchMock };
+  return { client, fetchMock, calls, tokenCalls };
 }
 
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
+/** A raw v8 warehouse product with one EA (default) + PLT UoM. */
+function rawProduct(over: Record<string, unknown> = {}) {
+  return {
+    id: "whp-1",
+    references: { code: "AE-BLA" },
+    name: "AE - Dark Blackout",
+    customer: { id: FORAGE_CUSTOMER_ID },
+    defaultUnitOfMeasure: "EA",
+    unitOfMeasures: {
+      EA: { id: "uom-ea", name: "Each", barcode: "19345911000021" },
+      PLT: { id: "uom-plt", name: "Pallet" },
+    },
+    ...over,
+  };
+}
+
+describe("CcClient OAuth2 token", () => {
+  it("fetches a client_credentials token with Basic auth + caches it", async () => {
+    const { client, tokenCalls, calls } = makeClient({ dataResponder: () => json([]) });
+    await client.listProducts(1, 100);
+    await client.listProducts(2, 100);
+
+    // One token fetch, reused across both data calls.
+    expect(tokenCalls).toHaveLength(1);
+    expect(tokenCalls[0].url).toBe(TOKEN_URL);
+    expect(tokenCalls[0].init.method).toBe("POST");
+    const th = tokenCalls[0].init.headers as Record<string, string>;
+    expect(th.Authorization).toBe(expectedBasic);
+    expect(th["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(tokenCalls[0].init.body).toBe("grant_type=client_credentials");
+    expect(calls).toHaveLength(2);
   });
 
-describe("CcClient.lookupByBarcode", () => {
-  it("returns a CcProduct for a known barcode", async () => {
-    const { client, fetchMock } = makeClient({
-      responder: () =>
-        json([
-          {
-            id: "prod-1",
-            barcode: "9300675024635",
-            name: "Cadbury Dairy Milk 200g",
-            length: 300,
-            width: 200,
-            height: 150,
-            weight: 2.4,
-          },
-        ]),
+  it("refreshes the token shortly before it expires", async () => {
+    let t = 0;
+    const { client, tokenCalls } = makeClient({
+      dataResponder: () => json([]),
+      clock: () => t,
+      tokenResponder: () => json({ access_token: "tok", expires_in: 3600 }), // 1h
     });
-
-    const product = await client.lookupByBarcode("9300675024635", WAREHOUSE);
-
-    expect(product).toEqual({
-      id: "prod-1",
-      barcode: "9300675024635",
-      name: "Cadbury Dairy Milk 200g",
-      length: 300,
-      width: 200,
-      height: 150,
-      weight: 2.4,
-    });
-
-    // Correct URL + query params.
-    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
-    expect(calledUrl.origin + calledUrl.pathname).toBe(`${BASE}/products`);
-    expect(calledUrl.searchParams.get("barcode")).toBe("9300675024635");
-    expect(calledUrl.searchParams.get("warehouseAccountId")).toBe(WAREHOUSE);
+    await client.listProducts(1, 100);
+    expect(tokenCalls).toHaveLength(1);
+    // Advance to within the 60s refresh skew of expiry → refetch.
+    t = 3600_000 - 30_000;
+    await client.listProducts(1, 100);
+    expect(tokenCalls).toHaveLength(2);
   });
 
-  it("sends the correct auth + tenant + version headers", async () => {
-    const { client, fetchMock } = makeClient({ responder: () => json([]) });
-    await client.lookupByBarcode("x", WAREHOUSE);
-
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    const headers = init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe(`Bearer ${API_KEY}`);
-    expect(headers["X-Tenant-Id"]).toBe(TENANT);
-    expect(headers["Accept-Version"]).toBe("1");
-    expect(init.method).toBe("GET");
+  it("throws CcApiError(401) when the token endpoint rejects", async () => {
+    const { client } = makeClient({ tokenResponder: () => new Response("nope", { status: 401 }) });
+    await expect(client.listProducts(1, 100)).rejects.toMatchObject({ statusCode: 401 });
   });
 
-  it("returns null when CC responds 404", async () => {
-    const { client } = makeClient({
-      responder: () => new Response("not found", { status: 404 }),
+  it("on a 401 from a DATA call, refreshes the token and retries once (succeeds)", async () => {
+    let data = 0;
+    const { client, calls, tokenCalls } = makeClient({
+      // first data call 401s mid-flight (stale token); second succeeds.
+      dataResponder: () => (++data === 1 ? new Response("stale", { status: 401 }) : json([])),
     });
-    expect(await client.lookupByBarcode("nope", WAREHOUSE)).toBeNull();
+    const result = await client.listProducts(1, 100);
+    expect(result).toEqual([]);
+    expect(tokenCalls).toHaveLength(2); // initial fetch + one forced refresh
+    expect(calls).toHaveLength(2); // original + exactly one retry
   });
 
-  it("returns null for an empty result set", async () => {
-    const { client } = makeClient({ responder: () => json([]) });
-    expect(await client.lookupByBarcode("nope", WAREHOUSE)).toBeNull();
-  });
-
-  it("unwraps a { data: [...] } envelope and coerces string numbers", async () => {
-    const { client } = makeClient({
-      responder: () =>
-        json({
-          data: [
-            { id: "p2", barcode: "b2", name: "N", length: "120", width: "80" },
-          ],
-        }),
+  it("surfaces a persistent data-call 401 after a single retry (no loop)", async () => {
+    const { client, calls, tokenCalls } = makeClient({
+      dataResponder: () => new Response("nope", { status: 401 }),
     });
-    const product = await client.lookupByBarcode("b2", WAREHOUSE);
-    expect(product).toMatchObject({
-      id: "p2",
-      length: 120,
-      width: 80,
-      height: null,
-      weight: null,
-    });
-  });
-
-  it("throws CcApiError (with status) on a non-404 error", async () => {
-    const { client } = makeClient({
-      responder: () => new Response("boom", { status: 500 }),
-    });
-    await expect(client.lookupByBarcode("x", WAREHOUSE)).rejects.toMatchObject({
-      name: "CcApiError",
-      statusCode: 500,
-    });
-    await expect(client.lookupByBarcode("x", WAREHOUSE)).rejects.toBeInstanceOf(
-      CcApiError,
-    );
+    await expect(client.listProducts(1, 100)).rejects.toMatchObject({ statusCode: 401 });
+    expect(tokenCalls).toHaveLength(2); // one refresh attempt, then give up
+    expect(calls).toHaveLength(2); // original + one retry only — not an infinite loop
   });
 });
 
-describe("CcClient.patchProductDims", () => {
+describe("CcClient.listProducts (warehouse-products v8 search)", () => {
+  it("POSTs a customer-scoped search and maps to CcProduct (default-UoM dims/barcode)", async () => {
+    const { client, calls } = makeClient({
+      dataResponder: () =>
+        json([
+          rawProduct({
+            unitOfMeasures: {
+              EA: { id: "uom-ea", name: "Each", barcode: "bar-ea", length: 0.3, width: 0.2, height: 0.15, weight: 2.4 },
+              PLT: { id: "uom-plt", name: "Pallet", barcode: "bar-plt" },
+            },
+          }),
+        ]),
+    });
+
+    const products = await client.listProducts(1, 100);
+
+    expect(products).toEqual([
+      { id: "whp-1", code: "AE-BLA", barcode: "bar-ea", name: "AE - Dark Blackout", length: 0.3, width: 0.2, height: 0.15, weight: 2.4 },
+    ]);
+    const { url, init } = calls[0];
+    expect(url).toBe(`${BASE}${SEARCH_PATH}?page=1&size=100`);
+    expect(init.method).toBe("POST");
+    const h = init.headers as Record<string, string>;
+    expect(h.Authorization).toBe("Bearer tok-abc");
+    expect(h["Accept-Version"]).toBe("8");
+    expect(h["Content-Type"]).toBe("application/json");
+    const body = JSON.parse(init.body as string);
+    expect(body.condition.conditions[0]).toMatchObject({
+      field: { pointer: "/customer/id" },
+      value: { value: FORAGE_CUSTOMER_ID },
+      method: "EQUAL_TO",
+    });
+  });
+
+  it("falls back to the first barcoded UoM when the default has none", async () => {
+    const { client } = makeClient({
+      dataResponder: () =>
+        json([
+          rawProduct({
+            unitOfMeasures: {
+              EA: { id: "uom-ea", name: "Each" }, // no barcode
+              CT: { id: "uom-ct", name: "Carton", barcode: "ct-bar" },
+            },
+          }),
+        ]),
+    });
+    const [p] = await client.listProducts(1, 100);
+    expect(p.barcode).toBe("ct-bar");
+  });
+});
+
+describe("CcClient.lookupByBarcode", () => {
+  it("matches any UoM barcode across the search and returns the product", async () => {
+    const { client } = makeClient({
+      dataResponder: (u) => {
+        const page = new URL(u).searchParams.get("page");
+        if (page === "1") return json([rawProduct()]); // EA barcode 19345911000021
+        return json([]);
+      },
+    });
+    const p = await client.lookupByBarcode("19345911000021");
+    expect(p?.id).toBe("whp-1");
+  });
+
+  it("returns null when no product carries the barcode", async () => {
+    const { client } = makeClient({ dataResponder: () => json([]) });
+    expect(await client.lookupByBarcode("nope")).toBeNull();
+  });
+});
+
+describe("CcClient.patchProductDims (v8 JSON-Patch recipe)", () => {
   const dims: CcDimPayload = { length: 300, width: 200, height: 150, weight: 2.4 };
 
-  it("PATCHes /products/:id with the correct body and headers", async () => {
-    const { client, fetchMock } = makeClient({
-      responder: () => new Response(null, { status: 200 }),
-    });
+  /** Stateful responder: GET returns `product`; PATCH applies op:add into it. */
+  function statefulResponder(product: ReturnType<typeof rawProduct>, applyPatch = true) {
+    return async (url: string, init: RequestInit) => {
+      if (init.method === "GET") return json(product);
+      if (init.method === "PATCH") {
+        if (applyPatch) {
+          const ops = JSON.parse(init.body as string) as Array<{ path: string; value: number }>;
+          for (const op of ops) {
+            const m = op.path.match(/^\/unitOfMeasures\/([^/]+)\/(\w+)$/);
+            if (m) {
+              (product.unitOfMeasures as Record<string, Record<string, unknown>>)[m[1]][m[2]] = op.value;
+            }
+          }
+        }
+        return json({ ok: true });
+      }
+      return json([]);
+    };
+  }
 
-    await client.patchProductDims("prod-1", dims);
+  it("writes op:add metres on the default UoM, verifies read-back, returns written", async () => {
+    const product = rawProduct();
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe(`${BASE}/products/prod-1`);
-    expect(init.method).toBe("PATCH");
-    const headers = init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe(`Bearer ${API_KEY}`);
-    expect(headers["X-Tenant-Id"]).toBe(TENANT);
-    expect(headers["Content-Type"]).toBe("application/json");
-    // L/W/H converted mm→m at the CC boundary (CC stores carton dims in metres);
-    // weight (kg) unchanged. 300/200/150 mm → 0.3/0.2/0.15 m.
-    expect(JSON.parse(init.body as string)).toEqual({
-      length: 0.3,
-      width: 0.2,
-      height: 0.15,
-      weight: 2.4,
-    });
+    const outcome = await client.patchProductDims("whp-1", dims);
+    expect(outcome).toEqual({ status: "written", uom: "EA" });
+
+    const patch = must(calls.find((c) => c.init.method === "PATCH"));
+    expect(patch.url).toBe(`${BASE}/tenants/${TENANT}/warehouse-products/whp-1`);
+    const h = patch.init.headers as Record<string, string>;
+    expect(h["Content-Type"]).toBe("application/json-patch+json");
+    expect(h["Accept-Version"]).toBe("8");
+    expect(JSON.parse(patch.init.body as string)).toEqual([
+      { op: "add", path: "/unitOfMeasures/EA/length", value: 0.3 },
+      { op: "add", path: "/unitOfMeasures/EA/width", value: 0.2 },
+      { op: "add", path: "/unitOfMeasures/EA/height", value: 0.15 },
+      { op: "add", path: "/unitOfMeasures/EA/weight", value: 2.4 },
+    ]);
   });
 
-  it("converts non-round mm to metres without float noise", async () => {
-    const { client, fetchMock } = makeClient({
-      responder: () => new Response(null, { status: 200 }),
+  it("no-ops (no PATCH) when the default UoM dims already match", async () => {
+    const product = rawProduct({
+      unitOfMeasures: {
+        EA: { id: "uom-ea", name: "Each", barcode: "b", length: 0.3, width: 0.2, height: 0.15, weight: 2.4 },
+        PLT: { id: "uom-plt", name: "Pallet" },
+      },
     });
-    await client.patchProductDims("prod-1", { length: 255, width: 145, height: 7, weight: 1.3 });
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(JSON.parse(init.body as string)).toEqual({
-      length: 0.255,
-      width: 0.145,
-      height: 0.007,
-      weight: 1.3,
-    });
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
+    const outcome = await client.patchProductDims("whp-1", dims);
+    expect(outcome).toEqual({ status: "noop", uom: "EA" });
+    expect(calls.some((c) => c.init.method === "PATCH")).toBe(false);
   });
 
-  it("url-encodes the product id", async () => {
-    const { client, fetchMock } = makeClient({
-      responder: () => new Response(null, { status: 204 }),
+  it("only patches changed fields", async () => {
+    const product = rawProduct({
+      unitOfMeasures: {
+        EA: { id: "uom-ea", name: "Each", barcode: "b", length: 0.3 }, // length already correct
+        PLT: { id: "uom-plt", name: "Pallet" },
+      },
     });
-    await client.patchProductDims("a/b c", dims);
-    expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/products/a%2Fb%20c`);
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
+    await client.patchProductDims("whp-1", dims);
+    const ops = JSON.parse(must(calls.find((c) => c.init.method === "PATCH")).init.body as string);
+    expect(ops.map((o: { path: string }) => o.path)).toEqual([
+      "/unitOfMeasures/EA/width",
+      "/unitOfMeasures/EA/height",
+      "/unitOfMeasures/EA/weight",
+    ]);
   });
 
-  it("throws CcNotFoundError on 404", async () => {
+  it("blocks (no PATCH) a name-poisoned product", async () => {
+    const product = rawProduct({
+      unitOfMeasures: {
+        EA: { id: "uom-ea", name: "Each", barcode: "b" },
+        CT: { id: "uom-ct", name: "CT" }, // 2 chars → poisons the whole-product save
+      },
+    });
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
+    const outcome = await client.patchProductDims("whp-1", dims);
+    expect(outcome.status).toBe("blocked");
+    if (outcome.status === "blocked") expect(outcome.reason).toContain("CT");
+    expect(calls.some((c) => c.init.method === "PATCH")).toBe(false);
+  });
+
+  it("blocks (terminal, no PATCH) a non-Forage product — pinned customer guard", async () => {
+    const product = rawProduct({ customer: { id: "some-other-customer" } });
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
+    const outcome = await client.patchProductDims("whp-1", dims);
+    expect(outcome.status).toBe("blocked");
+    if (outcome.status === "blocked") expect(outcome.reason).toContain("non-Forage");
+    // terminal, not retryable: no PATCH was issued (only the guard GET).
+    expect(calls.some((c) => c.init.method === "PATCH")).toBe(false);
+  });
+
+  it("throws CcNotFoundError when the product GET 404s", async () => {
     const { client } = makeClient({
-      responder: () => new Response("gone", { status: 404 }),
+      dataResponder: () => new Response("gone", { status: 404 }),
     });
-    await expect(client.patchProductDims("ghost", dims)).rejects.toBeInstanceOf(
-      CcNotFoundError,
-    );
+    await expect(client.patchProductDims("ghost", dims)).rejects.toBeInstanceOf(CcNotFoundError);
   });
 
-  it("throws CcApiError (with status) on a non-404 error", async () => {
-    const { client } = makeClient({
-      responder: () => new Response("bad", { status: 422 }),
-    });
-    await expect(client.patchProductDims("p", dims)).rejects.toMatchObject({
+  it("throws on read-back mismatch (the live seatbelt)", async () => {
+    const product = rawProduct();
+    // applyPatch=false → read-back GET still shows no dims → mismatch.
+    const { client } = makeClient({ dataResponder: statefulResponder(product, false) });
+    await expect(client.patchProductDims("whp-1", dims)).rejects.toMatchObject({
       name: "CcApiError",
-      statusCode: 422,
     });
   });
 });
 
 describe("CcClient rate limiting", () => {
-  it("rejects the 61st request within a minute with CcRateLimitError", async () => {
+  it("drains the sync bucket via lookupByBarcode and refills at the configured rate", async () => {
     let t = 1_000_000;
-    // Explicit refillPerSec=1 (deprecated alias → syncRefillPerSec) to keep this
-    // test's 1000 ms advance == 1 token assertion independent of the production
-    // default rate (40/60 ≈ 0.6667/sec). Tests refill *logic*, not the default.
-    const { client, fetchMock } = makeClient({
-      responder: () => json([]),
-      clock: () => t, // frozen — no refill between calls
-      capacity: 60,
-      refillPerSec: 1,
-    });
-
-    // 60 requests drain the full bucket.
-    for (let i = 0; i < 60; i++) {
-      await client.lookupByBarcode(`b${i}`, WAREHOUSE);
-    }
-    expect(fetchMock).toHaveBeenCalledTimes(60);
-
-    // 61st is rejected before any HTTP call is made.
-    await expect(client.lookupByBarcode("over", WAREHOUSE)).rejects.toBeInstanceOf(
-      CcRateLimitError,
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(60);
-
-    // After 1 second, exactly one token refills (1/sec) and a call succeeds.
-    t += 1000;
-    await client.lookupByBarcode("after-refill", WAREHOUSE);
-    expect(fetchMock).toHaveBeenCalledTimes(61);
-  });
-
-  it("refills at configured rate, capped at capacity", async () => {
-    let t = 0;
-    // Explicit refillPerSec=1 so the 5 × 1000 ms advance == 5 tokens assertion
-    // is independent of the production default rate (40/60 ≈ 0.6667/sec).
-    const { client, fetchMock } = makeClient({
-      responder: () => json([]),
+    const { client, calls } = makeClient({
+      dataResponder: () => json([]), // empty page → 1 token per lookup, returns null
       clock: () => t,
-      capacity: 60,
-      refillPerSec: 1,
+      syncCapacity: 60,
+      syncRefillPerSec: 1,
     });
-    // Drain.
-    for (let i = 0; i < 60; i++) await client.lookupByBarcode(`b${i}`, WAREHOUSE);
-    // Advance 5s at 1/sec → 5 tokens back.
-    t += 5000;
-    for (let i = 0; i < 5; i++) await client.lookupByBarcode(`r${i}`, WAREHOUSE);
-    expect(fetchMock).toHaveBeenCalledTimes(65);
-    // 6th should fail — only 5 refilled.
-    await expect(client.lookupByBarcode("x", WAREHOUSE)).rejects.toBeInstanceOf(
-      CcRateLimitError,
-    );
+    for (let i = 0; i < 60; i++) await client.lookupByBarcode(`b${i}`);
+    expect(calls).toHaveLength(60);
+    await expect(client.lookupByBarcode("over")).rejects.toBeInstanceOf(CcRateLimitError);
+    expect(calls).toHaveLength(60);
+    t += 1000; // one token refills
+    await client.lookupByBarcode("after");
+    expect(calls).toHaveLength(61);
   });
 });
 
@@ -262,9 +348,9 @@ describe("CcClient configuration guard", () => {
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
-  it("throws CcApiError(500) when API key / tenant are missing", async () => {
-    const client = new CcClient({ apiKey: "", tenantId: "", baseUrl: BASE });
-    await expect(client.lookupByBarcode("x", WAREHOUSE)).rejects.toMatchObject({
+  it("throws CcApiError(500) when OAuth2 creds are missing", async () => {
+    const client = new CcClient({ clientId: "", clientSecret: "", tenantId: "", baseUrl: BASE });
+    await expect(client.listProducts(1, 100)).rejects.toMatchObject({
       name: "CcApiError",
       statusCode: 500,
     });

@@ -1,109 +1,148 @@
 /**
- * DEV / SMOKE ONLY — a minimal in-container CartonCloud stand-in for the
- * sku-seed smoke test. NEVER run by the production CMD (which is
- * `prisma migrate deploy && node dist/index.js`).
+ * DEV / SMOKE ONLY — a minimal in-container CartonCloud stand-in speaking the
+ * validated v8 OAuth2 / warehouse-products contract (module 16). NEVER run by the
+ * production CMD (`prisma migrate deploy && node dist/index.js`).
  *
- * Serves the CC endpoints the backend smokes exercise against `CC_BASE_URL`:
- *   GET   /products?warehouseAccountId=&page=&pageSize=  → seed list page (sku-seed)
- *   GET   /products?barcode=&warehouseAccountId=         → barcode lookup (sku-seed)
- *   PATCH /products/{id}                                 → dim sync (dim-api)
+ * Serves the endpoints the backend exercises against `CC_BASE_URL`:
+ *   POST  /uaa/oauth/token                              → OAuth2 token
+ *   POST  /tenants/{t}/warehouse-products/search?page=&size= → seed/lookup pages
+ *   GET   /tenants/{t}/warehouse-products/{id}          → read (incl. read-back)
+ *   PATCH /tenants/{t}/warehouse-products/{id}          → JSON-Patch op:add dims
  *
- * The catalogue is fixed and small: three products returned by the list pull
- * (one already carrying dims in CC), plus one extra product that is ONLY
- * reachable via barcode lookup — that proves the DB-miss → CC-fallback path.
- *
- * PATCH was added for the dim-api (module 04) smoke: it accepts a dim update
- * for any known product id (200) and 404s an unknown id, so the sync happy path
- * round-trips against a real CC-shaped response. Additive — the GET behaviour
- * sku-seed relies on is unchanged.
+ * Stateful: PATCHes mutate the in-memory UoM dims so the client's read-back
+ * verify passes. The catalogue includes a name-poisoned product (a 2-char `CT`
+ * UoM name) to prove the blocked path.
  */
 import http from "node:http";
 import { logger } from "../middleware/logger";
 
 const log = logger.child({ module: "mockCc" });
 const PORT = Number(process.env.MOCK_PORT ?? "9099");
+const CUSTOMER_ID = "d4810e1e-91ab-43ed-b68e-b72bd858b122"; // The Forage Company
 
-interface MockProduct {
+interface Uom {
   id: string;
-  barcode: string;
   name: string;
-  length: number | null;
-  width: number | null;
-  height: number | null;
-  weight: number | null;
+  barcode?: string;
+  length?: number;
+  width?: number;
+  height?: number;
+  weight?: number;
+}
+interface WhProduct {
+  id: string;
+  references: { code: string };
+  name: string;
+  customer: { id: string };
+  defaultUnitOfMeasure: string;
+  unitOfMeasures: Record<string, Uom>;
 }
 
-const noDims = { length: null, width: null, height: null, weight: null };
-
-// Products returned by the seed list pull.
-const LIST: MockProduct[] = [
-  { id: "cc-1", barcode: "9311111000011", name: "Forage Granola 500g", length: 300, width: 200, height: 150, weight: 0.5 },
-  { id: "cc-2", barcode: "9311111000028", name: "Forage Muesli 1kg", ...noDims },
-  { id: "cc-3", barcode: "9311111000035", name: "Forage Oats 750g", ...noDims },
-];
-
-// CC-only product — not in the list pages, only resolvable by barcode lookup.
-const CC_ONLY: MockProduct = {
-  id: "cc-9",
-  barcode: "9311111000099",
-  name: "Forage Trail Mix 250g (CC only)",
-  ...noDims,
+// Mutable catalogue (PATCH writes into it; GET read-back reflects it).
+const CATALOGUE: Record<string, WhProduct> = {
+  "whp-1": {
+    id: "whp-1",
+    references: { code: "FG-GRA" },
+    name: "Forage Granola 500g",
+    customer: { id: CUSTOMER_ID },
+    defaultUnitOfMeasure: "EA",
+    unitOfMeasures: {
+      EA: { id: "uom-ea-1", name: "Each", barcode: "9311111000011" },
+      PLT: { id: "uom-plt-1", name: "Pallet" },
+    },
+  },
+  // Name-poisoned: the CT UoM name is 2 chars (< CC's 3-char floor) → any dims
+  // PATCH on this product 422s, so the client must mark it blocked (no PATCH).
+  "whp-2": {
+    id: "whp-2",
+    references: { code: "FG-MUE" },
+    name: "Forage Muesli 1kg",
+    customer: { id: CUSTOMER_ID },
+    defaultUnitOfMeasure: "EA",
+    unitOfMeasures: {
+      EA: { id: "uom-ea-2", name: "Each", barcode: "9311111000028" },
+      CT: { id: "uom-ct-2", name: "CT", barcode: "29311111000025" },
+    },
+  },
 };
 
-const LOOKUP: Record<string, MockProduct> = Object.fromEntries(
-  [...LIST, CC_ONLY].map((p) => [p.barcode, p]),
-);
-
-// Product ids the PATCH (dim sync) endpoint will accept — every catalogue id.
-const KNOWN_IDS = new Set([...LIST, CC_ONLY].map((p) => p.id));
-
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(payload);
+  res.end(JSON.stringify(body));
 }
 
-const server = http.createServer((req, res) => {
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => resolve(data));
+  });
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  const path = url.pathname;
 
-  if (req.method === "GET" && url.pathname === "/products") {
-    const barcode = url.searchParams.get("barcode");
-
-    // Barcode lookup branch.
-    if (barcode !== null) {
-      const hit = LOOKUP[barcode];
-      if (!hit) {
-        sendJson(res, 404, { error: "not found" });
-        return;
-      }
-      sendJson(res, 200, [hit]);
-      return;
-    }
-
-    // List branch — page 1 has the catalogue, every later page is empty.
-    const page = Number(url.searchParams.get("page") ?? "1");
-    sendJson(res, 200, page === 1 ? LIST : []);
+  // OAuth2 token (not tenant-scoped).
+  if (req.method === "POST" && path === "/uaa/oauth/token") {
+    sendJson(res, 200, { access_token: "mock-token", token_type: "bearer", expires_in: 3600 });
     return;
   }
 
-  // PATCH /products/{id} — dim sync (dim-api). Drain the body, then 200 for a
-  // known product id or 404 for an unknown one (mirrors CcNotFoundError).
-  if (req.method === "PATCH" && url.pathname.startsWith("/products/")) {
-    const id = decodeURIComponent(url.pathname.slice("/products/".length));
-    req.on("data", () => {});
-    req.on("end", () => {
-      if (KNOWN_IDS.has(id)) {
-        sendJson(res, 200, { id, updated: true });
-      } else {
+  const wpBase = path.match(/\/tenants\/[^/]+\/warehouse-products(\/.*)?$/);
+  if (wpBase) {
+    const rest = wpBase[1] ?? "";
+
+    // Search: page 1 → catalogue, later pages → empty.
+    if (req.method === "POST" && rest.startsWith("/search")) {
+      await readBody(req);
+      const page = Number(url.searchParams.get("page") ?? "1");
+      sendJson(res, 200, page === 1 ? Object.values(CATALOGUE) : []);
+      return;
+    }
+
+    // /{id} read or patch.
+    const idMatch = rest.match(/^\/([^/?]+)/);
+    if (idMatch) {
+      const id = decodeURIComponent(idMatch[1]);
+      const product = CATALOGUE[id];
+      if (!product) {
         sendJson(res, 404, { error: "not found" });
+        return;
       }
-    });
-    return;
+      if (req.method === "GET") {
+        sendJson(res, 200, product);
+        return;
+      }
+      if (req.method === "PATCH") {
+        const raw = await readBody(req);
+        // Mimic CC: validate the WHOLE UoM name set first — a bad name 422s.
+        const bad = Object.values(product.unitOfMeasures).find(
+          (u) => u.name.length < 3 || u.name.length > 64,
+        );
+        if (bad) {
+          sendJson(res, 422, {
+            field: `/unitOfMeasures/${bad.name}/name`,
+            message: "Must be between 3 and 64 characters.",
+          });
+          return;
+        }
+        const ops = JSON.parse(raw) as Array<{ op: string; path: string; value: number }>;
+        for (const op of ops) {
+          const m = op.path.match(/^\/unitOfMeasures\/([^/]+)\/(length|width|height|weight)$/);
+          if (m && product.unitOfMeasures[m[1]]) {
+            (product.unitOfMeasures[m[1]] as unknown as Record<string, number>)[m[2]] = op.value;
+          }
+        }
+        sendJson(res, 200, { id, updated: true });
+        return;
+      }
+    }
   }
 
   sendJson(res, 404, { error: "unhandled route" });
 });
 
 server.listen(PORT, () => {
-  log.info({ port: PORT, listCount: LIST.length }, "mock CartonCloud listening");
+  log.info({ port: PORT, products: Object.keys(CATALOGUE).length }, "mock CartonCloud (v8) listening");
 });

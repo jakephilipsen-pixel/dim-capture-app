@@ -42,6 +42,17 @@ Each still needs `/add-module` to scaffold `brief.md`/`prompt.md`/`smoke.md` bef
 | 14 | `sync-key-prompt` | ✅ | feature/sync-key-prompt | 05, 07, 12 | Operator authorises CC sync from the PWA via a per-session sync key. `lib/syncKey.ts` (sessionStorage store); `api.syncToCC()` sends `X-Sync-Key` header, handles 401 by clearing key; `useSync` skips CC-sync silently when no key; Review "Sync Now" opens prompt dialog on first use. New `components/ui/dialog.tsx`. tsc clean; 59/59 tests (+18). 2026-06-08. |
 | 15 | `floor-camera-flow` | ✅ | feature/floor-camera-flow | 04, 06 | **Floor — full-screen mobile camera capture (from the claude.ai/design mockup).** Three routes OUTSIDE `<Layout>`: `/floor` (FloorScan — ZXing barcode camera + manual fallback), `/floor/capture/:barcode` (FloorCapture — SKU lookup, progress ring, customer chip, SKU card, Dry/Ambient/Chilled/Frozen toggle, carton-photo thumbnail, **L/W/H/KG in cm** with live auto-volume, SAVE), FloorPhotoCapture (getUserMedia carton camera → downscaled JPEG). **Backend:** `Dim.productType` + `Dim.photoPath` (additive migration); `POST/GET /api/dims/:id/photo` (on-disk JPEG, raw parser); `productType` validated. cm display / **mm-canonical storage** (cmToMm at the form boundary — no DB migration; see DECISIONS 2026-06-23). Online: save dims → upload photo (best-effort); offline: dims queue (photo needs a connection). tsc/lint/build clean; backend 154 tests (+20), frontend 64 tests (+5). **⚠ pre-existing flag (not fixed): cc-client sends dims to CC in mm — CC wants cm (the parent-repo 10× bug); needs a separate gated fix.** 2026-06-23. Smoke + local-deploy gate pending Jake. |
 
+## Combine-pipeline modules (2026-06-24 — make the app carry the proven CC write recipe)
+
+Design: `docs/superpowers/specs/2026-06-24-combine-pipeline-design.md`. The app's original
+`cc-client` spoke a never-validated v1 contract (Bearer key, `/products` PATCH) that cannot
+write dims. These modules swap in the recipe proven live in the parent `gocold-wms-flow` repo.
+
+| # | Name | Status | Branch | Depends on | Notes |
+|---|------|--------|--------|-----------|-------|
+| 16 | `cc-oauth-write` | 🟨 | feature/cc-oauth-write | 02, 03, 04, 12 | **Rewrite the CC layer to the validated recipe.** OAuth2 client_credentials on `api.cartoncloud.com` (tenant-scoped); seed/lookup re-pointed to `/warehouse-products` v8 (barcode from `unitOfMeasures.{uom}.barcode`, code from `references.code`); `patchProductDims` → v8 JSON-Patch `op:add` on `/unitOfMeasures/{defaultUoM}/{field}` in **metres**, with name-poison guard + idempotent diff + read-back verify. `syncService` gains a **blocked** terminal state. Live-probe-grounded (2026-06-24). Built + adversarially reviewed (11 medium/low findings fixed); 159 backend tests + `tsc` + smoke green. → ✅ on PR merge. |
+| 17 | `blocked-sku-feedback` | 🔲 | — | 16, 05, 07 | Operator UI for name-poisoned/blocked SKUs (consumes the `blocked` state from 16). May fold into 16. |
+
 ## Build order
 01 → 02 → 03 → 04 (all backend) → 05 → 06 → 07 (all frontend) → 08 (deploy)
 

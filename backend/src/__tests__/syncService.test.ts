@@ -78,20 +78,20 @@ describe("syncUnsyncedDims", () => {
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 0, failed: 0, pending: 0 });
+    expect(report).toEqual({ synced: 0, failed: 0, blocked: 0, pending: 0 });
     expect(cc.patchProductDims).not.toHaveBeenCalled();
     expect(dim.update).not.toHaveBeenCalled();
   });
 
   it("PATCHes each dim with mm/kg verbatim and marks it synced", async () => {
     dim.findMany.mockResolvedValue([pendingDim(1)] as never);
-    cc.patchProductDims.mockResolvedValue(undefined as never);
+    cc.patchProductDims.mockResolvedValue({ status: "written", uom: "EA" } as never);
     dim.update.mockResolvedValue({} as never);
     dim.count.mockResolvedValue(0 as never);
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 1, failed: 0, pending: 0 });
+    expect(report).toEqual({ synced: 1, failed: 0, blocked: 0, pending: 0 });
     // CC product id is the dim's skuId; payload is the stored mm/kg unchanged.
     expect(cc.patchProductDims).toHaveBeenCalledWith("prod-1", {
       length: 101,
@@ -110,13 +110,13 @@ describe("syncUnsyncedDims", () => {
   it("processes every dim across multiple batches of 10", async () => {
     const dims = Array.from({ length: 23 }, (_, i) => pendingDim(i + 1));
     dim.findMany.mockResolvedValue(dims as never);
-    cc.patchProductDims.mockResolvedValue(undefined as never);
+    cc.patchProductDims.mockResolvedValue({ status: "written", uom: "EA" } as never);
     dim.update.mockResolvedValue({} as never);
     dim.count.mockResolvedValue(0 as never);
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 23, failed: 0, pending: 0 });
+    expect(report).toEqual({ synced: 23, failed: 0, blocked: 0, pending: 0 });
     expect(cc.patchProductDims).toHaveBeenCalledTimes(23);
     expect(dim.update).toHaveBeenCalledTimes(23);
   });
@@ -126,15 +126,15 @@ describe("syncUnsyncedDims", () => {
     dim.findMany.mockResolvedValue(dims as never);
     // Middle dim fails; the other two succeed.
     cc.patchProductDims
-      .mockResolvedValueOnce(undefined as never)
+      .mockResolvedValueOnce({ status: "written", uom: "EA" } as never)
       .mockRejectedValueOnce(new Error("CC 500") as never)
-      .mockResolvedValueOnce(undefined as never);
+      .mockResolvedValueOnce({ status: "written", uom: "EA" } as never);
     dim.update.mockResolvedValue({} as never);
     dim.count.mockResolvedValue(1 as never); // the failed dim is still pending
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 2, failed: 1, pending: 1 });
+    expect(report).toEqual({ synced: 2, failed: 1, blocked: 0, pending: 1 });
     expect(cc.patchProductDims).toHaveBeenCalledTimes(3);
     // Only the two successes were marked synced — never the failed dim (id 2).
     expect(dim.update).toHaveBeenCalledTimes(2);
@@ -151,7 +151,7 @@ describe("syncUnsyncedDims", () => {
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 0, failed: 2, pending: 2 });
+    expect(report).toEqual({ synced: 0, failed: 2, blocked: 0, pending: 2 });
     expect(dim.update).not.toHaveBeenCalled();
   });
 
@@ -162,7 +162,7 @@ describe("syncUnsyncedDims", () => {
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 0, failed: 0, pending: 4 });
+    expect(report).toEqual({ synced: 0, failed: 0, blocked: 0, pending: 4 });
     // The guard fired before any work: no read of the unsynced set, no PATCH,
     // no marks. The in-flight winner owns the sync.
     expect(cc.patchProductDims).not.toHaveBeenCalled();
@@ -174,13 +174,13 @@ describe("syncUnsyncedDims", () => {
     // Lock acquired (beforeEach default). Verify no double-PATCH under the lock.
     const dims = [pendingDim(1), pendingDim(2), pendingDim(3)];
     dim.findMany.mockResolvedValue(dims as never);
-    cc.patchProductDims.mockResolvedValue(undefined as never);
+    cc.patchProductDims.mockResolvedValue({ status: "written", uom: "EA" } as never);
     dim.update.mockResolvedValue({} as never);
     dim.count.mockResolvedValue(0 as never);
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 3, failed: 0, pending: 0 });
+    expect(report).toEqual({ synced: 3, failed: 0, blocked: 0, pending: 0 });
     expect(cc.patchProductDims).toHaveBeenCalledTimes(3);
     expect(dim.update).toHaveBeenCalledTimes(3);
     const patchedIds = cc.patchProductDims.mock.calls.map((c) => c[0]);
@@ -191,20 +191,55 @@ describe("syncUnsyncedDims", () => {
     const dims = [pendingDim(1), pendingDim(2), pendingDim(3)];
     dim.findMany.mockResolvedValue(dims as never);
     cc.patchProductDims
-      .mockResolvedValueOnce(undefined as never)
+      .mockResolvedValueOnce({ status: "written", uom: "EA" } as never)
       .mockRejectedValueOnce(new Error("CC 500") as never)
-      .mockResolvedValueOnce(undefined as never);
+      .mockResolvedValueOnce({ status: "written", uom: "EA" } as never);
     dim.update.mockResolvedValue({} as never);
     dim.count.mockResolvedValue(1 as never);
 
     const report = await syncUnsyncedDims();
 
-    expect(report).toEqual({ synced: 2, failed: 1, pending: 1 });
+    expect(report).toEqual({ synced: 2, failed: 1, blocked: 0, pending: 1 });
     expect(cc.patchProductDims).toHaveBeenCalledTimes(3); // loop continued
     expect(dim.update).toHaveBeenCalledTimes(2); // only the two successes marked
     const updatedIds = dim.update.mock.calls.map(
       (c) => (c[0] as { where: { id: number } }).where.id,
     );
     expect(updatedIds).toEqual([1, 3]);
+  });
+
+  it("counts a noop (already-correct in CC) as synced", async () => {
+    dim.findMany.mockResolvedValue([pendingDim(1)] as never);
+    cc.patchProductDims.mockResolvedValue({ status: "noop", uom: "EA" } as never);
+    dim.update.mockResolvedValue({} as never);
+    dim.count.mockResolvedValue(0 as never);
+
+    const report = await syncUnsyncedDims();
+
+    expect(report).toEqual({ synced: 1, failed: 0, blocked: 0, pending: 0 });
+    expect(dim.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ syncedToCC: true }) }),
+    );
+  });
+
+  it("marks a name-poisoned dim blocked and excludes it from pending", async () => {
+    dim.findMany.mockResolvedValue([pendingDim(1)] as never);
+    cc.patchProductDims.mockResolvedValue({
+      status: "blocked",
+      reason: "blocked — UoM name invalid (CC 3-64 chars): CT",
+    } as never);
+    dim.update.mockResolvedValue({} as never);
+    dim.count.mockResolvedValue(0 as never); // blocked is excluded from the pending count
+
+    const report = await syncUnsyncedDims();
+
+    expect(report).toEqual({ synced: 0, failed: 0, blocked: 1, pending: 0 });
+    // The blocked dim gets its reason recorded (and is NOT marked synced).
+    expect(dim.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 1 },
+        data: { syncBlockedReason: "blocked — UoM name invalid (CC 3-64 chars): CT" },
+      }),
+    );
   });
 });

@@ -238,7 +238,7 @@ describe("saveDim — S8 advisory lock (blocking capture serialisation)", () => 
 // ===========================================================================
 
 describe("getProgress — M1 consistent-read transaction", () => {
-  it("issues all three count queries inside a single $transaction call", async () => {
+  it("issues all five count queries inside a single $transaction call", async () => {
     // We need to intercept the array-form $transaction call and resolve the
     // individual count promises.  Override $transaction to capture the array
     // and run it through Promise.all, then spy on what was passed.
@@ -252,25 +252,29 @@ describe("getProgress — M1 consistent-read transaction", () => {
       return (arg as (tx: unknown) => unknown)({ sku, dim, $queryRaw: queryRaw });
     });
 
-    // The three counts must resolve to consistent values.
+    // The counts must resolve to consistent values (module 16 added retryable
+    // pendingSync + blocked, so dim.count is now called four times).
     sku.count.mockResolvedValue(460 as never);
     dim.count
       .mockResolvedValueOnce(47 as never)  // captured (all dims)
-      .mockResolvedValueOnce(43 as never); // syncedToCC=true
+      .mockResolvedValueOnce(43 as never)  // syncedToCC=true
+      .mockResolvedValueOnce(3 as never)   // pendingSync (retryable: unsynced AND not blocked)
+      .mockResolvedValueOnce(1 as never);  // blocked (name-poison)
 
     const result = await getProgress();
 
     // $transaction must have been called exactly once.
     expect($transaction).toHaveBeenCalledTimes(1);
-    // The captured argument must be an array of three promises.
+    // The captured argument must be an array of five count promises.
     expect(Array.isArray(capturedArray)).toBe(true);
-    expect((capturedArray as unknown[]).length).toBe(3);
+    expect((capturedArray as unknown[]).length).toBe(5);
     // Results are computed from those values.
     expect(result).toEqual({
       total: 460,
       captured: 47,
       syncedToCC: 43,
-      pendingSync: 4,
+      pendingSync: 3,
+      blocked: 1,
       percentage: 10.2,
     });
   });
@@ -291,6 +295,7 @@ describe("getProgress — M1 consistent-read transaction", () => {
       captured: 0,
       syncedToCC: 0,
       pendingSync: 0,
+      blocked: 0,
       percentage: 0,
     });
     expect($transaction).toHaveBeenCalledTimes(1);

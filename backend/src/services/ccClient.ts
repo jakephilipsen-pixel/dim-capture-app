@@ -19,8 +19,14 @@
  * Rate limiting (module 10 cc-resilience, preserved):
  *   - syncBucket: guards lookupByBarcode + patchProductDims.
  *   - seedBucket: guards listProducts (the warehouse-products search pull).
- *   Combined burst 60, sustained 60/min ≤ CC's tenant ceiling. The OAuth2 token
- *   fetch does NOT consume a bucket token (it's auth, not a data call).
+ *   One token is charged per LOGICAL op, NOT per HTTP call. `patchProductDims`
+ *   is now 3 HTTP calls per token (GET + PATCH + read-back GET) since the v8
+ *   recipe needs a read + a verify; the PATCH itself stays ≈1 per token, and the
+ *   2 extra calls are reads (CC hard-caps writes, ~30/min, far more than reads —
+ *   gotcha #5). So the bucket bounds the *write* rate, not raw HTTP volume.
+ *   The OAuth2 token fetch does NOT consume a bucket token (it's auth, not data).
+ *   // TODO(robustness): charge per HTTP call or pace the bulk sync if a large
+ *   // first-rollout backlog ever trips CC's limit.
  *
  * Fetch timeouts (module 10, preserved): every fetch gets AbortSignal.timeout;
  * a timeout becomes CcTimeoutError (504); the raw DOMException never escapes.
@@ -523,7 +529,10 @@ export class CcClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(searchBody(this.customerId)),
     });
-    if (res.status === 404) return [];
+    // NOTE: do NOT treat 404 as an empty page here. /warehouse-products/search is a
+    // supported endpoint; a 404 means a misconfigured path/tenant/version, not
+    // end-of-pagination (that's handled by empty/short pages in the callers). Masking
+    // it would make a broken seed report a silent zero-product success.
     if (!res.ok) {
       throw new CcApiError(
         `warehouse-products search failed (page ${page}): ${res.status} ${await safeText(res)}`,
@@ -570,13 +579,16 @@ export class CcClient {
     this.guard("sync");
     const raw = await this.getWarehouseProduct(productId);
 
-    // (2) customer guard — never write to a non-Forage product.
+    // (2) customer guard — never write to a non-Forage product. Pinned to the
+    // FORAGE_CUSTOMER_ID CONSTANT (not the env-configurable this.customerId used
+    // for reads/search), so the live write path can't be silently retargeted off
+    // Forage via CC_CUSTOMER_ID. A mismatch is a permanent, terminal condition →
+    // return blocked (NOT a throw) so it leaves the retry set instead of looping.
     const customerId = raw.customer?.id ?? "";
-    if (customerId !== this.customerId) {
-      throw new CcApiError(
-        `refusing to write dims to ${productId}: customer ${customerId} is not the configured customer`,
-        403,
-      );
+    if (customerId !== FORAGE_CUSTOMER_ID) {
+      const reason = `blocked — non-Forage customer: ${customerId || "(none)"}`;
+      log.warn({ productId, customerId }, "refusing dims write — product is not Forage");
+      return { status: "blocked", reason };
     }
 
     // (3) name-poison guard.

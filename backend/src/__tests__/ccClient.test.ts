@@ -116,6 +116,27 @@ describe("CcClient OAuth2 token", () => {
     const { client } = makeClient({ tokenResponder: () => new Response("nope", { status: 401 }) });
     await expect(client.listProducts(1, 100)).rejects.toMatchObject({ statusCode: 401 });
   });
+
+  it("on a 401 from a DATA call, refreshes the token and retries once (succeeds)", async () => {
+    let data = 0;
+    const { client, calls, tokenCalls } = makeClient({
+      // first data call 401s mid-flight (stale token); second succeeds.
+      dataResponder: () => (++data === 1 ? new Response("stale", { status: 401 }) : json([])),
+    });
+    const result = await client.listProducts(1, 100);
+    expect(result).toEqual([]);
+    expect(tokenCalls).toHaveLength(2); // initial fetch + one forced refresh
+    expect(calls).toHaveLength(2); // original + exactly one retry
+  });
+
+  it("surfaces a persistent data-call 401 after a single retry (no loop)", async () => {
+    const { client, calls, tokenCalls } = makeClient({
+      dataResponder: () => new Response("nope", { status: 401 }),
+    });
+    await expect(client.listProducts(1, 100)).rejects.toMatchObject({ statusCode: 401 });
+    expect(tokenCalls).toHaveLength(2); // one refresh attempt, then give up
+    expect(calls).toHaveLength(2); // original + one retry only — not an infinite loop
+  });
 });
 
 describe("CcClient.listProducts (warehouse-products v8 search)", () => {
@@ -275,10 +296,14 @@ describe("CcClient.patchProductDims (v8 JSON-Patch recipe)", () => {
     expect(calls.some((c) => c.init.method === "PATCH")).toBe(false);
   });
 
-  it("refuses to write to a non-Forage product (customer guard)", async () => {
+  it("blocks (terminal, no PATCH) a non-Forage product — pinned customer guard", async () => {
     const product = rawProduct({ customer: { id: "some-other-customer" } });
-    const { client } = makeClient({ dataResponder: statefulResponder(product) });
-    await expect(client.patchProductDims("whp-1", dims)).rejects.toMatchObject({ statusCode: 403 });
+    const { client, calls } = makeClient({ dataResponder: statefulResponder(product) });
+    const outcome = await client.patchProductDims("whp-1", dims);
+    expect(outcome.status).toBe("blocked");
+    if (outcome.status === "blocked") expect(outcome.reason).toContain("non-Forage");
+    // terminal, not retryable: no PATCH was issued (only the guard GET).
+    expect(calls.some((c) => c.init.method === "PATCH")).toBe(false);
   });
 
   it("throws CcNotFoundError when the product GET 404s", async () => {

@@ -133,11 +133,13 @@ export async function syncUnsyncedDims(): Promise<SyncReport> {
             if (outcome.status === "blocked") {
               // CC can't accept this write (name-poison). Record the reason and
               // leave it OUT of the retry set; a re-capture clears the reason.
-              blocked += 1;
+              // Increment AFTER the persist (mirrors the synced path) so a failed
+              // update is counted once as `failed`, never double-counted as both.
               await tx.dim.update({
                 where: { id: dim.id },
                 data: { syncBlockedReason: outcome.reason },
               });
+              blocked += 1;
               log.warn(
                 { dimId: dim.id, skuId: dim.skuId, reason: outcome.reason },
                 "CC dim sync blocked — name-poisoned product, excluded from retry",

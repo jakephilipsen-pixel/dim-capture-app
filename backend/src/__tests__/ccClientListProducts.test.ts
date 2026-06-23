@@ -60,12 +60,14 @@ describe("CcClient.listProducts (warehouse-products v8 search)", () => {
     expect(products[1].length).toBeNull();
   });
 
-  it("treats a 404 page as the end of the result set (empty)", async () => {
+  it("throws on a 404 (a supported endpoint 404 = misconfigured path/tenant, NOT end-of-pagination)", async () => {
+    // End-of-pagination is signalled by an empty/short page, never by a 404.
+    // Masking a 404 would let a broken seed report a silent zero-product success.
     const { client } = makeClient(() => new Response("", { status: 404 }));
-    expect(await client.listProducts(5, 100)).toEqual([]);
+    await expect(client.listProducts(5, 100)).rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it("throws CcApiError on a non-2xx (non-404) response", async () => {
+  it("throws CcApiError on a non-2xx response", async () => {
     const { client } = makeClient(() => new Response("boom", { status: 500 }));
     await expect(client.listProducts(1, 100)).rejects.toBeInstanceOf(CcApiError);
   });

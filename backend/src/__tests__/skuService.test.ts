@@ -133,8 +133,8 @@ describe("seedSkus", () => {
     const firstCall = sku.upsert.mock.calls[0][0];
     expect(firstCall).toMatchObject({
       where: { id: "prod-0" },
-      create: { id: "prod-0", barcode: "bc-0", name: "Product 0", ccDimsCaptured: true },
-      update: { barcode: "bc-0", name: "Product 0", ccDimsCaptured: true },
+      create: { id: "prod-0", code: "code-0", barcode: "bc-0", name: "Product 0", ccDimsCaptured: true },
+      update: { code: "code-0", barcode: "bc-0", name: "Product 0", ccDimsCaptured: true },
     });
   });
 
@@ -371,7 +371,9 @@ describe("getProgress", () => {
     sku.count.mockResolvedValue(460 as never);
     dim.count
       .mockResolvedValueOnce(47 as never) // captured (all dims)
-      .mockResolvedValueOnce(43 as never); // syncedToCC
+      .mockResolvedValueOnce(43 as never) // syncedToCC
+      .mockResolvedValueOnce(3 as never) // pendingSync (retryable: unsynced AND not blocked)
+      .mockResolvedValueOnce(1 as never); // blocked (name-poison)
 
     const result = await getProgress();
 
@@ -379,14 +381,38 @@ describe("getProgress", () => {
       total: 460,
       captured: 47,
       syncedToCC: 43,
-      pendingSync: 4,
+      pendingSync: 3,
+      blocked: 1,
       percentage: 10.2,
     });
   });
 
+  it("excludes name-blocked dims from pendingSync and reports them as blocked", async () => {
+    // 10 captured: 6 synced, 1 retryable-unsynced, 3 name-blocked. The 3 blocked
+    // must NOT inflate pendingSync (else the dashboard never reaches zero).
+    sku.count.mockResolvedValue(10 as never);
+    dim.count
+      .mockResolvedValueOnce(10 as never) // captured
+      .mockResolvedValueOnce(6 as never) // syncedToCC
+      .mockResolvedValueOnce(1 as never) // pendingSync (retryable only)
+      .mockResolvedValueOnce(3 as never); // blocked
+
+    const result = await getProgress();
+
+    expect(result.pendingSync).toBe(1); // NOT 4 (would be captured - synced)
+    expect(result.blocked).toBe(3);
+    // The retryable predicate excludes blocked rows.
+    expect(dim.count).toHaveBeenCalledWith({ where: { syncedToCC: false, syncBlockedReason: null } });
+    expect(dim.count).toHaveBeenCalledWith({ where: { syncBlockedReason: { not: null } } });
+  });
+
   it("returns percentage 0 (no divide-by-zero) when there are no SKUs", async () => {
     sku.count.mockResolvedValue(0 as never);
-    dim.count.mockResolvedValueOnce(0 as never).mockResolvedValueOnce(0 as never);
+    dim.count
+      .mockResolvedValueOnce(0 as never)
+      .mockResolvedValueOnce(0 as never)
+      .mockResolvedValueOnce(0 as never)
+      .mockResolvedValueOnce(0 as never);
 
     const result = await getProgress();
 
@@ -395,6 +421,7 @@ describe("getProgress", () => {
       captured: 0,
       syncedToCC: 0,
       pendingSync: 0,
+      blocked: 0,
       percentage: 0,
     });
   });

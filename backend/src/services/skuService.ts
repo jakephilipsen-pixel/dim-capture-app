@@ -50,7 +50,8 @@ export interface ProgressResponse {
   total: number;
   captured: number;
   syncedToCC: number;
-  pendingSync: number;
+  pendingSync: number; // captured, not yet synced, NOT name-blocked (i.e. retryable)
+  blocked: number; // captured dims CC refuses (name-poison) — terminal until re-capture
   percentage: number; // captured/total * 100, one decimal place
 }
 
@@ -254,20 +255,26 @@ export async function getSkuByBarcode(barcode: string): Promise<SkuDetail> {
 /**
  * Capture-progress summary from live DB counts.
  *
- * M1 fix: the three counts are issued inside a single `prisma.$transaction([...])`
+ * M1 fix: the counts are issued inside a single `prisma.$transaction([...])`
  * (batch / read-only form) so they share one consistent DB snapshot.  Without this,
- * a concurrent write between any two of the three `count()` calls can produce an
+ * a concurrent write between any two of the `count()` calls can produce an
  * incoherent result (e.g. `captured > total`, or `syncedToCC > captured`).
+ *
+ * Module 16: `pendingSync` counts only RETRYABLE unsynced dims
+ * (`syncedToCC:false, syncBlockedReason:null`), matching syncService's retry
+ * predicate — so name-blocked dims don't keep the dashboard / auto-sync pinned
+ * forever. `blocked` is reported separately.
  */
 export async function getProgress(): Promise<ProgressResponse> {
-  const [total, captured, syncedToCC] = await prisma.$transaction([
+  const [total, captured, syncedToCC, pendingSync, blocked] = await prisma.$transaction([
     prisma.sku.count(),
     prisma.dim.count(),
     prisma.dim.count({ where: { syncedToCC: true } }),
+    prisma.dim.count({ where: { syncedToCC: false, syncBlockedReason: null } }),
+    prisma.dim.count({ where: { syncBlockedReason: { not: null } } }),
   ]);
 
-  const pendingSync = captured - syncedToCC;
   const percentage = total === 0 ? 0 : Math.round((captured / total) * 1000) / 10;
 
-  return { total, captured, syncedToCC, pendingSync, percentage };
+  return { total, captured, syncedToCC, pendingSync, blocked, percentage };
 }

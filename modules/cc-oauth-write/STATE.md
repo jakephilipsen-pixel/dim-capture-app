@@ -71,14 +71,23 @@ export function syncUnsyncedDims(): Promise<SyncReport>;                     // 
 - Env changed: `CC_CLIENT_ID`/`CC_CLIENT_SECRET` (was `CC_API_KEY`); `CC_WAREHOUSE_ID` no longer used.
 
 ## Test status
-- [x] Unit tests written (ccClient/ccClientListProducts/ccClientResilience/syncService/skuService updated)
-- [x] Unit tests passing — 156/156 backend; `tsc --noEmit` clean
+- [x] Unit tests written (ccClient/ccClientListProducts/ccClientResilience/syncService/skuService/dimService/writeConcurrency updated)
+- [x] Unit tests passing — 159/159 backend; `tsc --noEmit` clean
 - [x] Integration with dependencies verified — `smoke-module.sh cc-oauth-write` PASSED (real container + v8 mock)
 
+## Adversarial-review fixes applied (2026-06-24)
+- `getProgress` now counts `pendingSync` as retryable-only (`syncedToCC:false, syncBlockedReason:null`) + reports a separate `blocked` count — blocked dims no longer keep the dashboard/auto-sync pinned forever (ProgressResponse gained `blocked`).
+- warehouse-products **search no longer masks a 404** as an empty page (a 404 = misconfigured path/tenant, now throws — no silent zero-product seed).
+- syncService `blocked += 1` moved AFTER the persist (mirrors synced path; no double-count as blocked+failed).
+- Write **customer guard pinned to the FORAGE_CUSTOMER_ID constant** (not env-configurable `this.customerId`); a non-Forage product now returns terminal `blocked` (not a retryable 403 throw) so it leaves the retry set.
+- Token-accounting header comment corrected (1 token = up to 3 HTTP calls; reads not hard-capped) + TODO.
+- Tests added/strengthened: re-capture clears `syncBlockedReason` (saveDim + updateDim); 401→refresh→retry-once (success + persistent-401-no-loop); seed persists `Sku.code`; getProgress blocked-exclusion.
+
 ## In-flight / follow-ups
+- **Multi-barcode cache thrash (deferred):** a product with distinct barcodes on multiple UoMs caches only the last-scanned one in the single `Sku.barcode` column; scanning the other re-queries CC. Read-path inefficiency only (no corruption); revisit with a barcode-list table if Forage SKUs prove to carry per-UoM barcodes.
 - 4 pre-existing lint errors in `writeConcurrency.test.ts` (non-null assertions; unchanged from main, NOT this module).
-- Frontend `SyncStatus`/Review surfacing of `blocked` = module 17 `blocked-sku-feedback`.
-- MODULES.md row still 🟨 (parent flips to ✅ after adversarial review + PR).
+- Frontend `SyncStatus`/Review/Progress surfacing of `blocked` (now in ProgressResponse + SyncReport) = module 17 `blocked-sku-feedback`.
+- MODULES.md row still 🟨 (parent flips to ✅ after PR).
 
 ## Decisions made during this module's build
 See DECISIONS.md 2026-06-24 entries (OAuth2 swap, warehouse-products re-point, blocked state, read-back verify).

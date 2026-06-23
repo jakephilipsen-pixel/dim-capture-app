@@ -90,6 +90,8 @@ describe("saveDim", () => {
         update: expect.objectContaining({
           syncedToCC: false,
           syncedAt: null,
+          // sole re-arm path for a name-blocked SKU: a re-capture MUST clear the reason
+          syncBlockedReason: null,
           measuredAt: expect.any(Date),
           notes: "second pass",
         }),
@@ -208,7 +210,7 @@ describe("updateDim", () => {
     expect(dim.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 7 },
-        data: expect.objectContaining({ syncedToCC: false, syncedAt: null, lengthMm: 310 }),
+        data: expect.objectContaining({ syncedToCC: false, syncedAt: null, syncBlockedReason: null, lengthMm: 310 }),
       }),
     );
   });

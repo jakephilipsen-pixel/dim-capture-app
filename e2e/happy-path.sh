@@ -3,7 +3,7 @@
 #
 # A realistic cross-module floor round trip against the docker-compose.local.yml
 # gate stack (assume Stage 1 already brought it up). Goes through the FRONTEND
-# single-origin nginx proxy (the path the browser actually uses): frontend:5179
+# single-origin nginx proxy (the path the browser actually uses): frontend:5180
 # serves the PWA and proxies /api → backend. The backend talks only to the
 # in-container mock CartonCloud — no live CC.
 #
@@ -16,7 +16,7 @@
 # diagnosing the proxy.
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://localhost:5179}"
+BASE_URL="${BASE_URL:-http://localhost:5180}"
 SYNC_KEY="${SYNC_KEY:-smoke-secret}"
 
 # check <desc> <method> <path> <expected-status> [needle] [json-body]

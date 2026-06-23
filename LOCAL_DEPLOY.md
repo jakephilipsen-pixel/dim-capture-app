@@ -37,7 +37,7 @@ docker compose -f docker-compose.local.yml up -d
 mock CartonCloud (the v8 OAuth2/warehouse-products contract) + backend + frontend
 (single-origin nginx, `/api` proxied to backend). It points the backend at the mock CC
 (`CC_BASE_URL=http://mock-cc:9099`) and **never** talks to live CartonCloud. Host ports:
-frontend `:5179`, backend `:3015`.
+frontend `:5180`, backend `:3015`.
 
 Acceptance: stack reaches running state within 60s. For Cloudflare, `wrangler dev` reports "Ready on http://localhost:8787" (or whichever port).
 

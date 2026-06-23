@@ -4,7 +4,7 @@
 # an in-container mock CartonCloud (dist/smoke/mockCc.js, the v8
 # OAuth2/warehouse-products contract). It NEVER talks to live CartonCloud.
 #
-# Host ports are offset from production (frontend 5179, backend 3015) so the gate
+# Host ports are offset from production (frontend 5180, backend 3015) so the gate
 # can run without colliding with a production compose on 5175. A distinct project
 # name (dimcap-local) isolates containers/volumes.
 #
@@ -61,7 +61,7 @@ services:
       CC_CUSTOMER_ID: d4810e1e-91ab-43ed-b68e-b72bd858b122
       CC_BASE_URL: http://mock-cc:9099
       SYNC_SECRET: smoke-secret
-      FRONTEND_URL: http://localhost:5179
+      FRONTEND_URL: http://localhost:5180
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,7 +81,7 @@ services:
         # Relative API base → single origin; nginx proxies /api → backend:3005.
         VITE_API_URL: ""
     ports:
-      - "5179:80"
+      - "5180:80"
     depends_on:
       backend:
         condition: service_healthy

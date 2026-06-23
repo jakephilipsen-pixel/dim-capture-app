@@ -5,7 +5,7 @@
 #   NUC_URL=http://dims.gocold.local ./scripts/healthcheck-all.sh
 #
 # Local: the /deploy-local gate stack (docker-compose.local.yml) — single origin
-# via the frontend nginx on :5179, which serves the PWA and proxies /api → backend
+# via the frontend nginx on :5180, which serves the PWA and proxies /api → backend
 # (S5 — the backend has no public host port in production; reach it via the proxy).
-frontend http://localhost:5179/
-api http://localhost:5179/api/health
+frontend http://localhost:5180/
+api http://localhost:5180/api/health

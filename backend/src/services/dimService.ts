@@ -10,8 +10,9 @@
  * so it resets the CC sync state just like a `PUT` correction does.
  * (DECISIONS.md 2026-06-03.)
  *
- * Units: L/W/H are millimetres, weight is kilograms — stored verbatim, exactly
- * as CC expects them (cc-client passes them through with no conversion).
+ * Units: L/W/H are stored as millimetres (canonical), weight as kilograms.
+ * CartonCloud's UoM L/W/H are METRES, so `ccClient.patchProductDims` converts
+ * mm→m (÷1000) at the CC write boundary; storage here stays mm.
  */
 import { z } from "zod";
 import { prisma, withAdvisoryLock } from "../lib/db";

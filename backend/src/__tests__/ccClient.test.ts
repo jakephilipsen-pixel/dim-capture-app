@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CcClient,
+  CC_DEFAULT_BASE_URL,
   CcNotFoundError,
   CcRateLimitError,
   FORAGE_CUSTOMER_ID,
@@ -136,6 +137,28 @@ describe("CcClient OAuth2 token", () => {
     await expect(client.listProducts(1, 100)).rejects.toMatchObject({ statusCode: 401 });
     expect(tokenCalls).toHaveLength(2); // one refresh attempt, then give up
     expect(calls).toHaveLength(2); // original + one retry only — not an infinite loop
+  });
+
+  it("treats an empty CC_BASE_URL as the default (absolute token URL, not relative)", async () => {
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      seen.push(String(url));
+      return json(
+        String(url).endsWith("/uaa/oauth/token") ? { access_token: "tok", expires_in: 3600 } : [],
+      );
+    });
+    const client = new CcClient({
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      tenantId: TENANT,
+      baseUrl: "", // the documented blank `CC_BASE_URL=` must fall back to the default
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    await client.listProducts(1, 5);
+    const tokenUrl = must(seen.find((u) => u.endsWith("/uaa/oauth/token")));
+    // Was producing the relative "/uaa/oauth/token" (Invalid URL) before the `||` fix.
+    expect(tokenUrl).toBe(`${CC_DEFAULT_BASE_URL}/uaa/oauth/token`);
+    expect(tokenUrl.startsWith("https://")).toBe(true);
   });
 });
 

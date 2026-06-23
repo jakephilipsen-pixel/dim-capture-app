@@ -1,9 +1,10 @@
 {
   "deploy_target": "nuc",
   "local_validated": true,
-  "validated_at": "2026-06-07T19:35:59Z",
-  "git_sha": "a9d2136e07c8ab1de537378810769240b187990f",
-  "prod_deployed": false,
-  "prod_deployed_at": null,
-  "prod_url": null
+  "validated_at": "2026-06-23T19:09:51Z",
+  "git_sha": "44910af04ec6fa97674b5cf34817fb6ac68709ee",
+  "prod_deployed": true,
+  "prod_deployed_at": "2026-06-23T19:23:48Z",
+  "prod_url": "http://192.168.1.188:5175",
+  "prod_sha": "45878542aea51aa0ace102ec73c6bf03435053f2"
 }

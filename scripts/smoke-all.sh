@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # smoke-all.sh
-# Runs every module's smoke tests against the running full local stack.
-# Assumes docker-compose.local.yml is already up.
+# Runs every module's smoke test via scripts/smoke-module.sh. Each module boots
+# its OWN hermetic stack (real backend container + throwaway Postgres + the
+# in-container mock CartonCloud) and tears it down — so this does NOT require the
+# docker-compose.local.yml gate stack to be up, and it never touches live CC.
 #
 # Usage: ./scripts/smoke-all.sh
-
 set -euo pipefail
 
-if ! docker compose -f docker-compose.local.yml ps --format json | grep -q '"State":"running"'; then
-  echo "ERROR: local stack not running. Start it with: docker compose -f docker-compose.local.yml up -d"
+cd "$(dirname "$0")/.."
+
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: Docker daemon not running"
   exit 1
 fi
 
+PASSED=()
 FAILED=()
 
 for module_dir in modules/*/; do
@@ -22,28 +26,23 @@ for module_dir in modules/*/; do
     continue
   fi
 
+  echo ""
+  echo "════════════════════════════════════════════════════════════"
   echo "→ Smoke: $MODULE"
+  echo "════════════════════════════════════════════════════════════"
 
-  if [ -x "$module_dir/smoke/healthcheck.sh" ]; then
-    if ! "$module_dir/smoke/healthcheck.sh"; then
-      echo "✗ $MODULE healthcheck failed"
-      FAILED+=("$MODULE/healthcheck")
-      continue
-    fi
+  if ./scripts/smoke-module.sh "$MODULE"; then
+    PASSED+=("$MODULE")
+  else
+    echo "✗ $MODULE smoke failed"
+    FAILED+=("$MODULE")
   fi
-
-  if [ -x "$module_dir/smoke/happy-path.sh" ]; then
-    if ! "$module_dir/smoke/happy-path.sh"; then
-      echo "✗ $MODULE happy-path failed"
-      FAILED+=("$MODULE/happy-path")
-      continue
-    fi
-  fi
-
-  echo "✓ $MODULE"
 done
 
 echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "Smoke summary: ${#PASSED[@]} passed, ${#FAILED[@]} failed"
+[ ${#PASSED[@]} -gt 0 ] && echo "  passed: ${PASSED[*]}"
 if [ ${#FAILED[@]} -eq 0 ]; then
   echo "✓ All module smoke tests passed"
   exit 0

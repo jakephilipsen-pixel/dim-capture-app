@@ -1,19 +1,92 @@
+# Local deploy-gate stack for dim-capture-app — the HERMETIC full stack the
+# /deploy-local gate boots (Stage 1). It mirrors the production compose
+# (postgres + backend + frontend single-origin nginx) but points the backend at
+# an in-container mock CartonCloud (dist/smoke/mockCc.js, the v8
+# OAuth2/warehouse-products contract). It NEVER talks to live CartonCloud.
+#
+# Host ports are offset from production (frontend 5179, backend 3015) so the gate
+# can run without colliding with a production compose on 5175. A distinct project
+# name (dimcap-local) isolates containers/volumes.
+#
+#   docker compose -f docker-compose.local.yml up -d --build
+#   ./scripts/healthcheck-all.sh        # Stage 2 (frontend + proxied /api/health)
+#   ./scripts/smoke-all.sh              # Stage 3 (per-module hermetic smokes)
+#   ./e2e/happy-path.sh                 # Stage 4 (cross-module flow on this stack)
+name: dimcap-local
+
 services:
   postgres:
     image: postgres:16-alpine
-    ports:
-      - "5434:5432"
     environment:
       POSTGRES_DB: dimcapture
       POSTGRES_USER: gocold
       POSTGRES_PASSWORD: gocold
-    volumes:
-      - pgdata_local:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gocold -d dimcapture"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-volumes:
-  pgdata_local:
+  # In-container mock CartonCloud — speaks the v8 OAuth2/warehouse-products
+  # contract (token endpoint + search + GET + json-patch PATCH + read-back),
+  # including a name-poisoned product. Internal only; no live CC anywhere.
+  mock-cc:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["node", "dist/smoke/mockCc.js"]
+    environment:
+      NODE_ENV: production
+      MOCK_PORT: "9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --post-data='grant_type=client_credentials' 'http://localhost:9099/uaa/oauth/token' | grep -q access_token"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3015:3005"
+    environment:
+      NODE_ENV: production
+      PORT: "3005"
+      DATABASE_URL: postgresql://gocold:gocold@postgres:5432/dimcapture
+      # Hermetic CC: smoke creds + the in-container mock. Customer pinned to Forage.
+      CC_CLIENT_ID: smoke-id
+      CC_CLIENT_SECRET: smoke-secret
+      CC_TENANT_ID: smoke-tenant
+      CC_CUSTOMER_ID: d4810e1e-91ab-43ed-b68e-b72bd858b122
+      CC_BASE_URL: http://mock-cc:9099
+      SYNC_SECRET: smoke-secret
+      FRONTEND_URL: http://localhost:5179
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-cc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/health | grep -q '\"db\":\"connected\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Relative API base → single origin; nginx proxies /api → backend:3005.
+        VITE_API_URL: ""
+    ports:
+      - "5179:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

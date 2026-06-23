@@ -1,8 +1,11 @@
 # Health check endpoints - one per line
 # Format: <service-name> <url-or-path>
 # Read by scripts/healthcheck-all.sh. Override the host with NUC_URL to check the
-# NUC instead of localhost:
+# NUC instead of localhost (only the PATH is used then):
 #   NUC_URL=http://dims.gocold.local ./scripts/healthcheck-all.sh
 #
-# S5 — the backend no longer publishes a host port; reach it via the nginx proxy.
-api http://localhost:5175/api/health
+# Local: the /deploy-local gate stack (docker-compose.local.yml) — single origin
+# via the frontend nginx on :5179, which serves the PWA and proxies /api → backend
+# (S5 — the backend has no public host port in production; reach it via the proxy).
+frontend http://localhost:5179/
+api http://localhost:5179/api/health

@@ -33,6 +33,12 @@ docker compose -f docker-compose.local.yml build
 docker compose -f docker-compose.local.yml up -d
 ```
 
+`docker-compose.local.yml` is the **hermetic full stack**: postgres + an in-container
+mock CartonCloud (the v8 OAuth2/warehouse-products contract) + backend + frontend
+(single-origin nginx, `/api` proxied to backend). It points the backend at the mock CC
+(`CC_BASE_URL=http://mock-cc:9099`) and **never** talks to live CartonCloud. Host ports:
+frontend `:5179`, backend `:3015`.
+
 Acceptance: stack reaches running state within 60s. For Cloudflare, `wrangler dev` reports "Ready on http://localhost:8787" (or whichever port).
 
 ### Stage 2: Health checks
@@ -43,7 +49,10 @@ Acceptance: stack reaches running state within 60s. For Cloudflare, `wrangler de
 Acceptance: every health check returns 200 within 30s of boot completion.
 
 ### Stage 3: Smoke tests
-Run every module's smoke test against the running stack:
+Run every module's smoke test. `smoke-all.sh` delegates to `smoke-module.sh <name>` for each
+module with a `smoke/` dir — each boots its OWN hermetic stack (real backend container +
+throwaway Postgres + the in-container mock CC) and tears it down, so this is self-contained and
+does not depend on the Stage-1 gate stack:
 ```bash
 ./scripts/smoke-all.sh
 ```

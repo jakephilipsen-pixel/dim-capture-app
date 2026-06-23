@@ -23,8 +23,9 @@
  *   `CcTimeoutError extends CcApiError` (statusCode 504). The raw DOMException
  *   never escapes to callers.
  *
- * Units are passed through verbatim: CC expects mm for dims and kg for
- * weight. This client does NOT convert; callers own unit handling.
+ * Units: callers pass dims in the app's canonical mm + kg. CartonCloud stores
+ * carton L/W/H in CENTIMETRES, so `patchProductDims` converts mm→cm (÷10) at the
+ * write boundary; weight (kg) is unchanged.
  */
 import { logger } from "../middleware/logger";
 
@@ -72,12 +73,21 @@ export interface CcProduct {
   weight: number | null;
 }
 
-/** Dimension payload pushed to CC. Units: mm for L/W/H, kg for weight. */
+/**
+ * Dimension payload pushed to CC. Callers pass the app's canonical **mm** for
+ * L/W/H and **kg** for weight; `patchProductDims` converts mm→cm at the CC
+ * boundary (CartonCloud stores carton dims in centimetres).
+ */
 export interface CcDimPayload {
   length: number;
   width: number;
   height: number;
   weight: number;
+}
+
+/** Convert a millimetre length to centimetres (CC's unit), rounded to kill FP noise. */
+function mmToCm(mm: number): number {
+  return Math.round((mm / 10) * 1000) / 1000;
 }
 
 /** Raised when the rate-limit bucket is empty — the request is NOT sent. */
@@ -419,8 +429,14 @@ export class CcClient {
   /**
    * Push captured dimensions to a CC product.
    * `PATCH /products/{productId}` with `{ length, width, height, weight }`.
-   * Units pass through unchanged (mm / kg). Throws `CcNotFoundError` on 404,
-   * `CcApiError` on any other non-2xx response.
+   *
+   * UNITS: callers pass `CcDimPayload` in the app's canonical **mm / kg** (the DB
+   * unit). CartonCloud stores carton L/W/H in **centimetres**, so we convert
+   * mm→cm (÷10) here at the CC boundary; weight (kg) is sent unchanged. This was
+   * proven in the parent gocold-wms-flow repo — sending mm wrote dims 10× too
+   * large. Converting in this one method keeps every sync path correct.
+   *
+   * Throws `CcNotFoundError` on 404, `CcApiError` on any other non-2xx response.
    */
   async patchProductDims(productId: string, dims: CcDimPayload): Promise<void> {
     this.guard("sync");
@@ -432,9 +448,9 @@ export class CcClient {
         method: "PATCH",
         headers: this.headers(true),
         body: JSON.stringify({
-          length: dims.length,
-          width: dims.width,
-          height: dims.height,
+          length: mmToCm(dims.length),
+          width: mmToCm(dims.width),
+          height: mmToCm(dims.height),
           weight: dims.weight,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),

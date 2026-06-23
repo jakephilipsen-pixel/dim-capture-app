@@ -68,8 +68,17 @@ export interface DimWithSku {
   syncedToCC: boolean;
   syncedAt: Date | null;
   notes: string | null;
+  productType: string | null;
+  photoPath: string | null;
   sku: { name: string; barcode: string };
 }
+
+/**
+ * Carton classes the Floor capture screen offers (the Dry/Ambient/Chilled/Frozen
+ * toggle). Stored verbatim; optional, so non-Floor captures omit it.
+ */
+export const PRODUCT_TYPES = ["Dry", "Ambient", "Chilled", "Frozen"] as const;
+export type ProductType = (typeof PRODUCT_TYPES)[number];
 
 /**
  * Sensible upper bounds for dimension values.
@@ -135,6 +144,9 @@ export const captureSchema = z.object({
   weightKg: weightKgField,
   measuredBy: z.string().trim().min(1, "measuredBy is required"),
   notes: z.string().trim().optional(),
+  // Floor: optional carton class. Constrained to the toggle's four values so a
+  // typo can't reach the DB; omitted by the non-Floor capture page (still valid).
+  productType: z.enum(PRODUCT_TYPES, { error: "productType must be Dry, Ambient, Chilled or Frozen" }).optional(),
 });
 export type CaptureInput = z.infer<typeof captureSchema>;
 
@@ -183,6 +195,7 @@ export async function saveDim(raw: unknown): Promise<import("@prisma/client").Di
     weightKg: input.weightKg,
     measuredBy: input.measuredBy,
     notes: input.notes ?? null,
+    productType: input.productType ?? null,
   };
 
   // blocking: true — use pg_advisory_xact_lock (BLOCKING variant).
@@ -245,9 +258,34 @@ export async function updateDim(id: number, raw: unknown) {
       weightKg: input.weightKg,
       measuredBy: input.measuredBy,
       notes: input.notes ?? null,
+      productType: input.productType ?? null,
       measuredAt: new Date(),
       syncedToCC: false,
       syncedAt: null,
     },
   });
+}
+
+/** Fetch one dim by id, or throw a 404. Lets the photo route confirm the dim
+ * exists BEFORE writing a file to disk (no orphan JPEG for an unknown id). */
+export async function getDim(id: number): Promise<import("@prisma/client").Dim> {
+  const dim = await prisma.dim.findUnique({ where: { id } });
+  if (!dim) {
+    throw new AppError(`Dim ${id} not found`, 404);
+  }
+  return dim;
+}
+
+/**
+ * Attach (or replace) the carton photo path on a dim. Called by the photo route
+ * after the JPEG bytes have been written to disk. 404 if the dim id is unknown.
+ * Does NOT touch the CC sync state — a photo is metadata that rides along with
+ * the dims, not a re-measurement, so it must not trigger a re-sync on its own.
+ */
+export async function setDimPhoto(id: number, photoPath: string) {
+  const existing = await prisma.dim.findUnique({ where: { id } });
+  if (!existing) {
+    throw new AppError(`Dim ${id} not found`, 404);
+  }
+  return prisma.dim.update({ where: { id }, data: { photoPath } });
 }

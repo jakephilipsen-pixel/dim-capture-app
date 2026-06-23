@@ -51,6 +51,8 @@ const ALPHA_DIM: DimWithSku = {
   syncedToCC: false,
   syncedAt: null,
   notes: null,
+  productType: null,
+  photoPath: null,
   sku: { name: 'Alpha', barcode: 'b1' },
 }
 

@@ -32,4 +32,9 @@ model Dim {
   syncedToCC  Boolean   @default(false)
   syncedAt    DateTime?
   notes       String?
+  // Floor camera flow (feature/floor-camera-flow): the operator-selected carton
+  // class and an optional carton photo that rides along with the dims. Both are
+  // nullable so every existing row and every non-Floor capture stays valid.
+  productType String?   // Dry | Ambient | Chilled | Frozen (operator toggle)
+  photoPath   String?   // relative path of the stored carton JPEG, null until one is attached
 }

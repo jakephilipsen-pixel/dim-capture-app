@@ -50,7 +50,7 @@ write dims. These modules swap in the recipe proven live in the parent `gocold-w
 
 | # | Name | Status | Branch | Depends on | Notes |
 |---|------|--------|--------|-----------|-------|
-| 16 | `cc-oauth-write` | 🟨 | feature/cc-oauth-write | 02, 03, 04, 12 | **Rewrite the CC layer to the validated recipe.** OAuth2 client_credentials on `api.cartoncloud.com` (tenant-scoped); seed/lookup re-pointed to `/warehouse-products` v8 (barcode from `unitOfMeasures.{uom}.barcode`, code from `references.code`); `patchProductDims` → v8 JSON-Patch `op:add` on `/unitOfMeasures/{defaultUoM}/{field}` in **metres**, with name-poison guard + idempotent diff + read-back verify. `syncService` gains a **blocked** terminal state. Live-probe-grounded (2026-06-24). |
+| 16 | `cc-oauth-write` | 🟨 | feature/cc-oauth-write | 02, 03, 04, 12 | **Rewrite the CC layer to the validated recipe.** OAuth2 client_credentials on `api.cartoncloud.com` (tenant-scoped); seed/lookup re-pointed to `/warehouse-products` v8 (barcode from `unitOfMeasures.{uom}.barcode`, code from `references.code`); `patchProductDims` → v8 JSON-Patch `op:add` on `/unitOfMeasures/{defaultUoM}/{field}` in **metres**, with name-poison guard + idempotent diff + read-back verify. `syncService` gains a **blocked** terminal state. Live-probe-grounded (2026-06-24). Built + adversarially reviewed (11 medium/low findings fixed); 159 backend tests + `tsc` + smoke green. → ✅ on PR merge. |
 | 17 | `blocked-sku-feedback` | 🔲 | — | 16, 05, 07 | Operator UI for name-poisoned/blocked SKUs (consumes the `blocked` state from 16). May fold into 16. |
 
 ## Build order

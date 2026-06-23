@@ -8,6 +8,7 @@
 # The camera/torch/beep/offline-queue paths can't be driven headless; they are
 # covered by this module's unit tests.
 set -euo pipefail
+SYNC_KEY="${SYNC_KEY:-smoke-secret}"
 
 BACKEND_URL="${BACKEND_URL:-http://localhost:3010}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:5177}"
@@ -17,7 +18,7 @@ FRONTEND_URL="${FRONTEND_URL:-http://localhost:5177}"
 check() {
   local desc="$1" method="$2" path="$3" expected="$4" needle="${5:-}" json="${6:-}"
   local body status
-  local -a args=(-s -w $'\n%{http_code}' -X "$method")
+  local -a args=(-s -w $'\n%{http_code}' -H "X-Sync-Key: $SYNC_KEY" -X "$method")
   if [[ -n "$json" ]]; then
     args+=(-H "Content-Type: application/json" -d "$json")
   fi
@@ -55,18 +56,18 @@ fcheck() {
   echo "PASS: $desc → $status ${needle:+(contains '$needle')}"
 }
 
-# cc-2 = "Forage Muesli 1kg", barcode 9311111000028, no CC dims (the page's
+# whp-1 = "Forage Granola 500g", barcode 9311111000011, no CC dims (the page's
 # "No dims in CC" path).
-CAPTURE='{"skuId":"cc-2","lengthMm":320,"widthMm":210,"heightMm":160,"weightKg":0.9,"measuredBy":"Smoke"}'
+CAPTURE='{"skuId":"whp-1","lengthMm":320,"widthMm":210,"heightMm":160,"weightKg":0.9,"measuredBy":"Smoke"}'
 
 echo "── backend round-trip (what the Capture page calls) ──"
 # 1. Seed SKUs so a lookup has something to find.
-check "seed pulls CC products"        POST "/api/admin/seed"            200 '"upserted":3'
+check "seed pulls CC products"        POST "/api/admin/seed"            200 '"upserted":2'
 # 2. Page looks the scanned barcode up (DB-first).
-check "lookup by barcode"             GET  "/api/skus/9311111000028"    200 '"id":"cc-2"'
-check "lookup shows no CC dims"        GET  "/api/skus/9311111000028"    200 '"hasDims":false'
+check "lookup by barcode"             GET  "/api/skus/9311111000011"    200 '"id":"whp-1"'
+check "lookup shows no CC dims"        GET  "/api/skus/9311111000011"    200 '"hasDims":false'
 # 3. Page Save → POST /api/dims.
-check "save a dim"                     POST "/api/dims"                  200 '"skuId":"cc-2"'    "$CAPTURE"
+check "save a dim"                     POST "/api/dims"                  200 '"skuId":"whp-1"'    "$CAPTURE"
 # 4. Page refreshes progress after save.
 check "progress reflects capture"      GET  "/api/progress"              200 '"captured":1'
 check "capture pending sync"           GET  "/api/progress"              200 '"pendingSync":1'

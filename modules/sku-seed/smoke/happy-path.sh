@@ -5,6 +5,7 @@
 # Proves: empty start → seed (CC list pull) → idempotent re-seed → DB-first
 # barcode lookup → CC-fallback upsert → 404 → top-level progress.
 set -euo pipefail
+SYNC_KEY="${SYNC_KEY:-smoke-secret}"
 
 BASE_URL="${BASE_URL:-http://localhost:3009}"
 
@@ -13,7 +14,7 @@ BASE_URL="${BASE_URL:-http://localhost:3009}"
 check() {
   local desc="$1" method="$2" path="$3" expected="$4" needle="${5:-}"
   local body status
-  body=$(curl -s -w $'\n%{http_code}' -X "$method" "$BASE_URL$path")
+  body=$(curl -s -w $'\n%{http_code}' -H "X-Sync-Key: $SYNC_KEY" -X "$method" "$BASE_URL$path")
   status="${body##*$'\n'}"
   body="${body%$'\n'*}"
   if [[ "$status" != "$expected" ]]; then
@@ -32,29 +33,32 @@ check() {
 # 1. Empty DB to start.
 check "skus empty before seed"      GET  "/api/skus"                  200 '"total":0'
 
-# 2. Seed pulls the 3 mock-CC products; one already has dims in CC.
-check "seed pulls CC products"      POST "/api/admin/seed"           200 '"upserted":3'
-check "seed marks CC dims present"  POST "/api/admin/seed"           200 '"ccDimsPresent":1'
+# 2. CC-fallback: an un-seeded barcode on an empty DB → CC search finds it,
+#    upserts it, and reports source:cc. (Tested before seed: the v8 seed pulls
+#    every warehouse-product, so the fallback is only exercisable pre-seed.)
+check "lookup fallback (cc)"        GET  "/api/skus/9311111000011"    200 '"source":"cc"'
+check "fallback grew the table"     GET  "/api/skus"                  200 '"total":1'
 
-# 3. After seeding, 3 SKUs, none captured locally yet.
-check "skus total after seed"       GET  "/api/skus"                 200 '"total":3'
-check "skus captured still zero"    GET  "/api/skus"                 200 '"captured":0'
+# 3. Seed pulls both mock-CC warehouse-products (idempotently absorbing the one
+#    the fallback already upserted); neither carries CC dims yet.
+check "seed pulls CC products"      POST "/api/admin/seed"            200 '"upserted":2'
+check "seed: no CC dims yet"        POST "/api/admin/seed"            200 '"ccDimsPresent":0'
 
-# 4. Idempotency — re-running seed does not duplicate (still 3).
-check "skus total unchanged"        GET  "/api/skus"                 200 '"total":3'
+# 4. After seeding, 2 SKUs, none captured locally yet.
+check "skus total after seed"       GET  "/api/skus"                  200 '"total":2'
+check "skus captured still zero"    GET  "/api/skus"                  200 '"captured":0'
 
-# 5. DB-first lookup of a seeded barcode.
-check "lookup seeded barcode (db)"  GET  "/api/skus/9311111000011"   200 '"source":"db"'
+# 5. Idempotency — re-running seed does not duplicate (still 2).
+check "skus total unchanged"        GET  "/api/skus"                  200 '"total":2'
 
-# 6. CC-fallback: barcode not seeded but known to CC → upsert + source:cc.
-check "lookup fallback (cc)"        GET  "/api/skus/9311111000099"   200 '"source":"cc"'
-check "fallback grew the table"     GET  "/api/skus"                 200 '"total":4'
+# 6. DB-first lookup now that the barcode is seeded.
+check "lookup seeded barcode (db)"  GET  "/api/skus/9311111000011"    200 '"source":"db"'
 
 # 7. Unknown barcode → 404 from neither DB nor CC.
-check "unknown barcode 404"         GET  "/api/skus/0000000000000"   404
+check "unknown barcode 404"         GET  "/api/skus/0000000000000"    404
 
 # 8. Progress at the top-level path (spec: /api/progress, not /api/admin).
-check "progress summary"            GET  "/api/progress"             200 '"total":4'
+check "progress summary"            GET  "/api/progress"              200 '"total":2'
 check "progress percentage field"   GET  "/api/progress"             200 '"percentage":0'
 
 echo "All sku-seed smoke checks passed."

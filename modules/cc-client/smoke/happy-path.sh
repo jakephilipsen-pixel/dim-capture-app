@@ -34,8 +34,11 @@ check "lookup known product id" GET "/smoke/lookup?barcode=9300675024635" 200 '"
 # 2. Lookup of an unknown barcode returns found:false (404 from CC → null).
 check "lookup unknown barcode"  GET "/smoke/lookup?barcode=0000000000000" 200 '"found":false'
 
-# 3. PATCH dims round trip succeeds (units pass through unchanged).
-check "patch product dims"      POST "/smoke/patch" 200 '"patched":true'
+# 3. PATCH dims round trip succeeds (v8 JSON-Patch + read-back verify). The boot
+#    self-test already wrote these dims (asserting status:written), so this
+#    re-patch idempotently no-ops; either way a UoM-resolved (non-blocked)
+#    outcome proves the write path works.
+check "patch product dims"      POST "/smoke/patch" 200 '"uom":"EA"'
 
 # 4. PATCH to an unknown id raises CcNotFoundError.
 check "404 → CcNotFoundError"   GET "/smoke/notfound" 200 '"notFoundErrorRaised":true'

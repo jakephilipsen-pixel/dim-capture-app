@@ -1,0 +1,13 @@
+{
+  "phase_staged": true,
+  "declared_at": "2026-06-24",
+  "reason": "Deploy of 2026-06-24 ships modules 01-16 (the combine-pipeline core). Module 17 (operator UI for blocked SKUs) is deferred to a later phase; the backend already exposes the blocked state + a blocked count, so the floor can capture and sync without it.",
+  "deferred_modules": [
+    {
+      "id": 17,
+      "name": "blocked-sku-feedback",
+      "status": "planned",
+      "reason": "Operator UI for name-poisoned/blocked SKUs. Consumes the `blocked` state already emitted by module 16. App degrades gracefully without it (frontend ignores the extra field). Next build after this deploy."
+    }
+  ]
+}

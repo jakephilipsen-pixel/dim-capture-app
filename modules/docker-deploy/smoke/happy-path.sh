@@ -8,6 +8,7 @@
 #
 # CC sync is out of smoke scope (it needs real CC); the mock CC only backs the seed.
 set -euo pipefail
+SYNC_KEY="${SYNC_KEY:-smoke-secret}"
 
 BACKEND_URL="${BACKEND_URL:-http://localhost:3012}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:5179}"
@@ -16,7 +17,7 @@ FRONTEND_URL="${FRONTEND_URL:-http://localhost:5179}"
 req() {
   local desc="$1" base="$2" method="$3" path="$4" expected="$5" needle="${6:-}" json="${7:-}"
   local body status
-  local -a args=(-s -w $'\n%{http_code}' -X "$method")
+  local -a args=(-s -w $'\n%{http_code}' -H "X-Sync-Key: $SYNC_KEY" -X "$method")
   if [[ -n "$json" ]]; then
     args+=(-H "Content-Type: application/json" -d "$json")
   fi
@@ -36,19 +37,19 @@ req() {
   echo "PASS: $desc → $status ${needle:+(contains '$needle')}"
 }
 
-DIM='{"skuId":"cc-1","lengthMm":300,"widthMm":200,"heightMm":150,"weightKg":1.2,"measuredBy":"DeploySmoke"}'
+DIM='{"skuId":"whp-1","lengthMm":300,"widthMm":200,"heightMm":150,"weightKg":1.2,"measuredBy":"DeploySmoke"}'
 
 echo "── backend round trip (production image) ──"
 # Seed so there's a SKU to attach a dim to (mock CC backs this).
-req "seed pulls CC products"  "$BACKEND_URL" POST "/api/admin/seed" 200 '"upserted":3'
+req "seed pulls CC products"  "$BACKEND_URL" POST "/api/admin/seed" 200 '"upserted":2'
 # POST a dim and confirm it saved.
-req "POST a dim"              "$BACKEND_URL" POST "/api/dims"       200 '"skuId":"cc-1"' "$DIM"
-req "dim saved (direct read)" "$BACKEND_URL" GET  "/api/dims"       200 '"skuId":"cc-1"'
+req "POST a dim"              "$BACKEND_URL" POST "/api/dims"       200 '"skuId":"whp-1"' "$DIM"
+req "dim saved (direct read)" "$BACKEND_URL" GET  "/api/dims"       200 '"skuId":"whp-1"'
 
 echo "── single origin (browser path: frontend nginx → backend) ──"
 # The same saved dim, read back through the frontend's /api proxy — proves the
 # deploy's single-origin wiring serves live API data, not just the static shell.
-req "dim readable via frontend proxy" "$FRONTEND_URL" GET "/api/dims"   200 '"skuId":"cc-1"'
+req "dim readable via frontend proxy" "$FRONTEND_URL" GET "/api/dims"   200 '"skuId":"whp-1"'
 req "health via frontend proxy"       "$FRONTEND_URL" GET "/api/health" 200 '"db":"connected"'
 
 echo "── frontend shell ──"

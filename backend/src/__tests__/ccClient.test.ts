@@ -150,8 +150,28 @@ describe("CcClient.patchProductDims", () => {
     expect(headers.Authorization).toBe(`Bearer ${API_KEY}`);
     expect(headers["X-Tenant-Id"]).toBe(TENANT);
     expect(headers["Content-Type"]).toBe("application/json");
-    // Units pass through unchanged — no conversion.
-    expect(JSON.parse(init.body as string)).toEqual(dims);
+    // L/W/H converted mm→cm at the CC boundary (CC stores carton dims in cm);
+    // weight (kg) unchanged. 300/200/150 mm → 30/20/15 cm.
+    expect(JSON.parse(init.body as string)).toEqual({
+      length: 30,
+      width: 20,
+      height: 15,
+      weight: 2.4,
+    });
+  });
+
+  it("converts non-round mm to cm without float noise", async () => {
+    const { client, fetchMock } = makeClient({
+      responder: () => new Response(null, { status: 200 }),
+    });
+    await client.patchProductDims("prod-1", { length: 255, width: 145, height: 7, weight: 1.3 });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({
+      length: 25.5,
+      width: 14.5,
+      height: 0.7,
+      weight: 1.3,
+    });
   });
 
   it("url-encodes the product id", async () => {
